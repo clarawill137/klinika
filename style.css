@@ -282,3 +282,15 @@
     .kl-thumbs { grid-template-columns: repeat(4, 1fr); }
     .kl-thumbs.big { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* 0.2.0 — врачи Зёрнышка в Клинике, снимки-картинки (УЗИ беременности) */
+.kl-usimg { display: block; width: 100%; height: 100%; object-fit: cover; }
+.kl-scanbig.img img { display: block; width: 100%; height: auto; cursor: zoom-in; }
+.kl-thumb-i .kl-usimg { aspect-ratio: auto; }
+.kl-state { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); margin: 8px 0; font-size: 14px; }
+.kl-state span { color: var(--dim); font-size: 13px; }
+.kl-state.warn { border-color: rgba(242, 201, 76, .45); }
+.kl-state.warn b { color: var(--warn); }
+.kl-seg.sm button { justify-content: center; padding: 7px 8px; }
+.kl-docimg .kl-col b { font-size: 14px; }
+.kl-docimg .kl-col small { font-size: 12px; }

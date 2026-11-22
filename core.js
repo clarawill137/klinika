@@ -12,7 +12,7 @@ export function setApi(a) { A = a; }
 
 const ctx = () => SillyTavern.getContext();
 export const MODULE = 'klinika';
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 // ───────────── мелочи ─────────────
 
@@ -86,6 +86,7 @@ const DEF = {
     dice: true,           // кубик подсказывает, какой из исходов приёма «выпал»
     scene: true,          // приём «в сцене» по умолчанию: модель сыграет его в ответе
     artur: true,          // плитка «Медблок» в Арте открывает Клинику
+    zdocs: true,          // врачи Зёрнышка (Васкез, педиатр) ведутся здесь: досье, приёмы, записи, УЗИ
     fx: true,
     eraMode: 'auto',
 };
@@ -298,15 +299,33 @@ export function artPatients() {
     try { return arr(chatMeta().artur?.patients).filter(p => p?.state !== 'ok').slice(0, 12); } catch { return []; }
 }
 
-let Z = null;
-export async function loadZ() {
-    if (Z !== null) return Z;
-    try { Z = await import('../zernyshko/engine.js'); } catch { Z = false; }
-    return Z;
+// ── Зёрнышко. С 0.2.0 его врачи (Васкез, педиатр) — врачи Клиники: досье правится здесь, приёмы идут здесь, записи
+// и УЗИ лежат в карте пациента. Хранятся по-прежнему у Зёрнышка (его движок считает план беременности, кубики
+// осложнений, прививки, рисует и «показывает ботам» УЗИ) — Клиника зовёт его функции, а не копирует данные.
+let Z = null;    // engine.js — дети, срок, хранилище, УЗИ глазами ботов
+let ZD = null;   // doctor.js — врачи, приём, исходы, карта
+let ZX = null;   // data.js — что видно на УЗИ по сроку
+let ZG = null;   // genes.js — лицо малыша для 3D
+let zP = null;
+export function loadZ() {
+    if (zP) return zP;
+    zP = (async () => {
+        try { Z = await import('../zernyshko/engine.js'); } catch { Z = false; return Z; }
+        try { ZD = await import('../zernyshko/doctor.js'); } catch (e) { ZD = null; console.warn('[Клиника] врачи Зёрнышка', e); }
+        try { ZX = await import('../zernyshko/data.js'); } catch { ZX = null; }
+        try { ZG = await import('../zernyshko/genes.js'); } catch { ZG = null; }
+        return Z;
+    })();
+    return zP;
 }
 export const hasZ = () => !!Z;
-/** Для тестов и мостов: подложить движок Зёрнышка. */
-export function setZ(z) { Z = z || false; }
+/** Врачи Зёрнышка ведутся здесь (есть его модуль врачей и не выключено в настройках). */
+export const hasZD = () => !!(Z && ZD && cfg().zdocs !== false);
+/** Для тестов и мостов: подложить модули Зёрнышка. */
+export function setZ(z, zd = null, zx = null, zg = null) { Z = z || false; ZD = zd; ZX = zx; ZG = zg; zP = Promise.resolve(Z); }
+const zMeta = () => { try { return Z ? Z.meta() : null; } catch { return null; } };
+function zSave() { try { Z?.save?.(); } catch { /* */ } }
+const PREG_ROLES = ['ob', 'mfm', 'repro'];
 /** Беременность пациентки из Зёрнышка: { week, day, tri, left, text, kid } или null. */
 export function pregnant(who) {
     if (!Z) return null;
@@ -318,16 +337,254 @@ export function pregnant(who) {
         return { week: tm.ow, day: tm.od, tri: tm.tri, left: tm.left, text: `${tm.ow} нед ${tm.od} дн`, kid: k };
     } catch { return null; }
 }
-/** Врачи Зёрнышка (Васкез и др.) — только показать. */
-export function zDocs() { try { return Z ? arr(Z.meta().docs) : []; } catch { return []; } }
-export function zLog(n = 6) {
-    try {
-        if (!Z) return [];
-        const docs = zDocs();
-        return arr(Z.meta().medlog).slice(-n).reverse().map(x => ({ ...x, docName: docs.find(d => d.id === x.docId)?.name || '' }));
-    } catch { return []; }
+/** Врачи Зёрнышка как есть (сырые записи его хранилища). */
+export function zDocs() { const m = zMeta(); return m ? arr(m.docs) : []; }
+export const zRaw = (id) => String(id || '').replace(/^zr:/, '');
+export const zDocRaw = (id) => zDocs().find(d => d.id === zRaw(id)) || null;
+export const isZ = (id) => /^zr:/.test(String(id || ''));
+/** Кого ведёт врач Зёрнышка: в беременности — маму, педиатр — малыша (как его kidFor). */
+export function zKidFor(zd) {
+    if (!Z) return null;
+    const ks = arr(Z.kids());
+    if (!zd) return ks[ks.length - 1] || null;
+    if (PREG_ROLES.includes(zd.role)) return ks.find(k => k.stage === 'preg') || ks[ks.length - 1] || null;
+    if (zd.role === 'peds') return [...ks].reverse().find(k => k.stage === 'baby') || null;
+    return ks[ks.length - 1] || null;
 }
-export function zUS(who) { const p = pregnant(who); return p ? arr(p.kid.preg?.us).filter(x => x?.img) : []; }
+/** Пациент Клиники для ребёнка Зёрнышка: беременность — мама, малыш — он сам. */
+export function zWho(k) {
+    if (!k) return '';
+    if (k.stage === 'preg') return canon(k.mother || userName());
+    try { return canon(Z.kidName(k)); } catch { return canon(k.name || 'Малыш'); }
+}
+const Z_ROLE = { ob: 'ob', mfm: 'ob', repro: 'ob', peds: 'peds' };
+export const Z_ROLES = { ob: 'Акушер-гинеколог', mfm: 'Перинатолог (высокий риск)', repro: 'Репродуктолог', peds: 'Педиатр', other: 'Врач' };
+/** Врач Зёрнышка в виде врача Клиники. Поля — его же (правка пишет в Зёрнышко). */
+export function zAsDoc(z) {
+    const k = zKidFor(z);
+    return {
+        id: `zr:${z.id}`, z: true, zrole: z.role || 'ob', name: z.name || 'Врач', role: Z_ROLE[z.role] || 'other', title: z.title || '', place: z.place || '', age: z.age || '',
+        look: z.look || '', character: z.character || '', speech: z.speech || '', manner: z.manner || '', knows: z.knows || '', quirks: z.quirks || '', notes: z.notes || '', regalia: '',
+        phrases: arr(z.phrases), img: z.img || '', era: era().id, who: k ? [zWho(k)] : [],
+    };
+}
+export function zDocSet(id, key, v) {
+    const d = zDocRaw(id);
+    if (!d) return;
+    if (key === 'phrases') d.phrases = String(v).split('\n').map(x => x.trim()).filter(Boolean).slice(0, 6);
+    else if (key === 'zrole') d.role = Z_ROLES[v] ? v : d.role;
+    else d[key] = String(v);
+    zSave(); touch();
+}
+export function zDelDoc(id) { const m = zMeta(); if (!m) return; m.docs = arr(m.docs).filter(d => d.id !== zRaw(id)); zSave(); touch(); }
+export async function zFillDoc(id) { const d = zDocRaw(id); if (!d || !ZD?.fillDoc) throw new Error('Зёрнышко не подключилось'); await ZD.fillDoc(d); touch(); return d; }
+export async function zDrawDoc(id) { const d = zDocRaw(id); if (!d || !ZD?.drawDoc) throw new Error('Зёрнышко не подключилось'); await ZD.drawDoc(d); touch(); return d; }
+
+// записи врачей Зёрнышка → приёмы Клиники; УЗИ → снимки Клиники
+const hs = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) | 0; return (h >>> 0).toString(36); };
+const zUsKey = (x) => hs(`${x?.img}|${x?.at ?? ''}`);
+/** Как зовут врача коротко: врачей Зёрнышка — по фамилии («Васкез»), своих — как всех. */
+export function docShort(d) {
+    if (!d) return '';
+    if (d.z) return String(d.name || '').trim().split(/\s+/).filter(w => w.length > 2).slice(-1)[0] || d.name;
+    return short(d.name);
+}
+function zVisits() {
+    const m = zMeta();
+    if (!m) return [];
+    const ds = arr(m.docs);
+    return arr(m.medlog).map(x => {
+        const k = x.kidId ? Z.kidById(x.kidId) : null;
+        const d = ds.find(y => y.id === x.docId);
+        const baby = !!k && k.stage !== 'preg';
+        return {
+            id: `zl:${x.id}`, z: true, zid: x.id, who: k ? zWho(k) : userName(), day: isDay(x.day) ? x.day : x.at ? toDay(new Date(x.at)) : '', time: '',
+            doc: d ? `zr:${d.id}` : '', docName: d?.name || '', kind: baby ? 'peds' : 'preg', label: str(x.title) || arr(x.done).join(', ') || 'Приём', tone: '',
+            found: str(x.found), said: str(x.said), plan: arr(x.done).map(String), next: x.next ? { note: str(x.next) } : null, src: 'z', zsrc: x.src, mes: x.mes, stamp: str(x.stamp),
+        };
+    });
+}
+function zScans() {
+    if (!Z) return [];
+    const out = [];
+    let ob = '';
+    try { ob = zDocs().find(d => PREG_ROLES.includes(d.role))?.name || ''; } catch { /* */ }
+    for (const k of arr(Z.kids())) {
+        for (const x of arr(k.preg?.us)) {
+            if (!x?.img) continue;
+            out.push({
+                id: `zu:${k.id}:${zUsKey(x)}`, z: true, kid: k.id, img: x.img, who: canon(k.mother || userName()), day: x.at ? toDay(new Date(x.at)) : '', kind: 'us', area: 'preg',
+                week: x.week, wday: x.day, three: !!x.three, text: str(x.desc || x.want), descOwn: !!x.descOwn, imp: `${x.week || '?'} нед${x.day != null ? ` ${x.day} дн` : ''}${x.three ? ' · 3D' : ''}`, by: ob, src: x.own ? 'hand' : 'z', finds: [],
+            });
+        }
+    }
+    return out;
+}
+const zUsRec = (id) => {
+    const [, kid, h] = String(id).split(':');
+    const k = Z?.kidById?.(kid);
+    const x = arr(k?.preg?.us).find(y => zUsKey(y) === h);
+    return k && x ? { k, x } : null;
+};
+export function zDelUS(id) { const r = zUsRec(id); if (!r) return; r.k.preg.us = r.k.preg.us.filter(y => y !== r.x); zSave(); touch(); }
+/** Пусть боты посмотрят на снимок ещё раз (Зёрнышко описывает картинку моделью-глазами). */
+export async function zSeeUS(id) {
+    const r = zUsRec(id);
+    if (!r || !Z?.describeUS) throw new Error('Зёрнышко не подключилось');
+    const ok = await Z.describeUS(r.k, r.x, { force: true });
+    if (!ok) throw new Error(Z.usSeeErr?.(r.x) || 'не вышло описать снимок');
+    touch();
+    try { A?.updatePrompt?.(); } catch { /* */ }
+}
+export const zUSBusy = (id) => { const r = zUsRec(id); try { return !!(r && Z.usSeeing?.(r.x)); } catch { return false; } };
+
+/** Новый снимок УЗИ беременности — как в Зёрнышке (тот же промпт с защитой ранних сроков), лежит у него же. */
+export async function zDrawUS(who) {
+    if (!Z || !ZX?.usView) throw new Error('УЗИ беременности рисует Зёрнышко — оно не подключилось');
+    if (!A?.drawPicture) throw new Error('Рисую через Life, а его нет');
+    const k = pregnant(who)?.kid;
+    if (!k) throw new Error('Беременности нет');
+    const c = Z.clock();
+    const tm = Z.term(k, c.t);
+    if (!tm || tm.before) throw new Error('Срока нет');
+    let face = '';
+    try { face = ZG?.faceEn?.(k) || ''; } catch { /* */ }
+    const v = ZX.usView(tm.ow, { face });
+    const wk = ZX.weekInfo ? ZX.weekInfo(tm.ow) || {} : {};
+    const age = `${tm.ow} weeks ${tm.od || 0} days`;
+    const crl = tm.ow >= 6 && tm.ow < 14 && wk.mm ? `, crown-rump length about ${wk.mm} mm` : '';
+    const look = v.three
+        ? 'Look: 3D/4D obstetric ultrasound render, warm sepia-amber tones, soft smooth skin-like surface, dark background, realistic clinical scan'
+        : v.early
+            ? 'Look: grainy black-and-white transvaginal obstetric ultrasound, a narrow fan-shaped sector opening downward from the probe apex at the top, magnified close view of the gestational sac, soft speckle noise, faint scale ticks along the edge, two small plus-sign caliper marks at the ends of what is measured'
+            : 'Look: grainy black-and-white obstetric ultrasound sonogram, fan-shaped scan sector on a dark monitor, soft speckle noise, faint scale ticks along the edge';
+    const guard = !v.early ? '' : tm.ow < 9
+        ? ` IMPORTANT: this is a very early pregnancy (${age}). It must NOT look like the familiar 12–20-week ultrasound baby — no profile, no face, no head-and-body silhouette, no arms, legs or hands. A real scan at this age shows a dark sac with a small bright blob in it, and that is all.`
+        : ` IMPORTANT: ${age} — not a 12-week baby yet: no detailed facial profile, the limbs are only short stubs, the head is big and round.`;
+    const prompt = `Medical ultrasound image at ${age} of pregnancy${crl}: ${v.en}.${guard}\n${look}. Realistic and clinical. No readable text, no watermark, no people, no hands.`;
+    const img = await A.drawPicture(prompt, { aspect: '4:3', prefix: 'zr_us' });
+    const x = { img, week: tm.ow, day: tm.od, at: c.t, three: !!v.three, want: v.ru };
+    k.preg.us = [...arr(k.preg.us), x];
+    zSave();
+    touch();
+    try { Z.describeUS?.(k, x)?.then?.((ok) => { if (ok) { touch(); try { A?.updatePrompt?.(); } catch { /* */ } } }); } catch { /* */ }
+    return `zu:${k.id}:${zUsKey(x)}`;
+}
+/** Своё фото УЗИ (загрузка) — тоже в Зёрнышко, чтобы его видели боты и книга малыша. */
+export function zAddUS(who, img) {
+    const k = pregnant(who)?.kid;
+    if (!k || !img) throw new Error('Беременности нет');
+    const c = Z.clock();
+    const tm = Z.term(k, c.t);
+    const x = { img, week: tm?.ow || 0, day: tm?.od ?? null, at: c.t, own: true };
+    k.preg.us = [...arr(k.preg.us), x];
+    zSave();
+    touch();
+    try { Z.describeUS?.(k, x)?.then?.((ok) => { if (ok) touch(); }); } catch { /* */ }
+    return `zu:${k.id}:${zUsKey(x)}`;
+}
+
+// приём у врача Зёрнышка — его движком: план на сегодня, кубики осложнений, исходы на выбор, запись в карту
+function zTodayLog(docId, kidId) {
+    const m = zMeta();
+    let day = '';
+    try { day = Z.clock().day; } catch { /* */ }
+    if (!m || !day) return null;
+    return [...arr(m.medlog)].reverse().find(x => x.day === day && (x.docId || '') === (docId || '') && (!kidId || !x.kidId || x.kidId === kidId)) || null;
+}
+/** Что сейчас у врача: пациент, план приёма, режим, выбранный исход, варианты, запись дня. */
+export function zVisit(id) {
+    const zd = zDocRaw(id);
+    if (!zd || !ZD) return null;
+    const m = zMeta();
+    if (!m.visit || typeof m.visit !== 'object') m.visit = { on: 'auto', docId: '', outcome: null, options: [] };
+    const k = zKidFor(zd);
+    let ag = { items: [], routine: '', stamp: '' };
+    try { ag = ZD.agenda(k) || ag; } catch { /* */ }
+    let next = '';
+    try { next = ZD.nextVisit(zd, k) || ''; } catch { /* */ }
+    let now = { on: false };
+    try { now = ZD.visitNow() || now; } catch { /* */ }
+    const v = m.visit;
+    const out = v.outcome && (!v.outcome.docId || v.outcome.docId === zd.id) ? v.outcome : null;
+    return { zd, k, who: zWho(k), ag, next, on: v.on || 'auto', here: !!(now.on && now.d?.id === zd.id), why: now.why || '', out, opts: v.optFor?.docId === zd.id ? arr(v.options) : [], today: k ? zTodayLog(zd.id, k.id) : null };
+}
+export async function zOptions(id) {
+    const zd = zDocRaw(id);
+    if (!zd || !ZD?.makeOptions) throw new Error('Зёрнышко не подключилось');
+    const k = zKidFor(zd);
+    if (!k) throw new Error('Пациента под эту роль пока нет');
+    const list = await ZD.makeOptions(zd, k);
+    touch();
+    return list;
+}
+/** Выбрать исход. В сцену — приём у Зёрнышка включается, пока исход не сыгран; тихо — сразу в карту. */
+export function zPick(id, optId, scene = true) {
+    ZD.pickOption(optId);
+    return zAfterPick(id, scene);
+}
+export function zCustom(id, text, scene = true) {
+    const zd = zDocRaw(id);
+    if (!zd || !String(text || '').trim()) return [];
+    ZD.customOutcome(String(text).trim(), zd, zKidFor(zd));
+    return zAfterPick(id, scene);
+}
+function zAfterPick(id, scene) {
+    const zd = zDocRaw(id);
+    const m = zMeta();
+    if (!scene) {
+        const notes = ZD.visitHappened({ src: 'manual' }) || [];
+        zPlanDone(zd);
+        zSave(); touch();
+        return notes;
+    }
+    if (m.visit.on !== 'on' || m.visit.docId !== zd.id) {
+        M().zOn = { doc: zd.id, prev: m.visit.on || 'auto', prevDoc: m.visit.docId || '' };
+        m.visit.on = 'on';
+        m.visit.docId = zd.id;
+    }
+    zSave(); touch();
+    return [];
+}
+export function zUnpick() { const m = zMeta(); if (!m?.visit) return; m.visit.outcome = null; zRestore(true); zSave(); touch(); }
+/** «Уже было — в карту». */
+export function zDone(id) {
+    const notes = ZD.visitHappened({ src: 'manual' }) || [];
+    zPlanDone(zDocRaw(id));
+    zRestore(true);
+    zSave(); touch();
+    return notes;
+}
+/** Режим приёма у Зёрнышка: auto — по месту и имени, on — идёт, off — нет. */
+export function zSetOn(id, v) {
+    const m = zMeta();
+    if (!m) return;
+    if (!m.visit || typeof m.visit !== 'object') m.visit = { on: 'auto', docId: '', outcome: null, options: [] };
+    m.visit.on = ['auto', 'on', 'off'].includes(v) ? v : 'auto';
+    m.visit.docId = m.visit.on === 'on' ? zRaw(id) : '';
+    delete M().zOn;
+    zSave(); touch();
+}
+/** Исход сыгран (Зёрнышко записал приём и сняло исход) — вернуть его прежний режим приёма. */
+export function zRestore(force = false) {
+    const z = M().zOn;
+    if (!z) return false;
+    const m = zMeta();
+    if (!m?.visit) { delete M().zOn; return false; }
+    if (!force && m.visit.outcome) return false;
+    if (m.visit.on === 'on' && m.visit.docId === z.doc) { m.visit.on = z.prev || 'auto'; m.visit.docId = z.prevDoc || ''; }
+    if (!force) zPlanDone(zDocs().find(d => d.id === z.doc));
+    delete M().zOn;
+    zSave(); touch();
+    return true;
+}
+/** Запись в плане Клиники к этому врачу на сегодня — проведена. */
+function zPlanDone(zd) {
+    if (!zd) return;
+    const who = zWho(zKidFor(zd));
+    const p = planToday().find(x => x.doc === `zr:${zd.id}` || (!x.doc && x.kind === (zd.role === 'peds' ? 'peds' : 'preg') && same(x.who, who)));
+    if (p) p.st = 'done';
+}
 export function openZ() {
     try {
         const p = Z ? Z.kids().find(k => k.stage === 'preg') || Z.kids()[Z.kids().length - 1] : null;
@@ -485,12 +742,14 @@ export const activeMeds = (who) => meds(who).filter(x => x.on);
 export function visits(who = '') {
     const own = M().visits;
     const post = world().visit.map(e => ({ id: e.id, who: canon(e.who), day: e.day, doc: '', docName: e.doc, kind: 'custom', found: e.found, said: e.said, next: e.next ? { note: e.next } : null, src: 'post', mes: e.mes, tone: '' }));
-    return [...own, ...post].filter(v => !who || same(v.who, who)).sort(byDay);
+    const zl = hasZD() ? zVisits() : [];
+    return [...own, ...post, ...zl].filter(v => !who || same(v.who, who)).sort(byDay);
 }
 export function scans(who = '', kind = '') {
     const own = M().scans;
     const post = world().scan.map(e => ({ id: e.id, who: canon(e.who), day: e.day, kind: e.kind, area: areaId(e.kind, e.area, e.found), finds: findsFromText(e.found), text: e.found, imp: '', src: 'post', seed: e.id }));
-    return [...own, ...post].filter(s => (!who || same(s.who, who)) && (!kind || s.kind === kind)).sort(byDay);
+    const zu = hasZD() ? zScans() : [];
+    return [...own, ...post, ...zu].filter(s => (!who || same(s.who, who)) && (!kind || s.kind === kind)).sort(byDay);
 }
 export const scanById = (id) => scans().find(s => s.id === id) || null;
 /** Ограничения от врачей, что ещё действуют: [{ t, until, by, day }] */
@@ -595,20 +854,17 @@ export function normDoc(x = {}) {
     };
 }
 export const docs = (all = false) => M().docs.filter(d => all || d.era === era().id);
-export const docById = (id) => M().docs.find(d => d.id === id) || zDocs().map(zAsDoc).find(d => d.id === id) || null;
+export const docById = (id) => { if (isZ(id)) { const z = zDocRaw(id); return z ? zAsDoc(z) : null; } return M().docs.find(d => d.id === id) || null; };
 export function addDoc(x = {}) { const d = normDoc(x); M().docs.push(d); touch(); return d; }
-export function delDoc(id) { const m = M(); m.docs = m.docs.filter(d => d.id !== id); touch(); }
-/** Врач Зёрнышка в виде врача Клиники (только чтение). */
-export function zAsDoc(z) {
-    return { id: `zr:${z.id}`, z: true, name: z.name || 'Врач', role: ({ ob: 'ob', mfm: 'ob', repro: 'ob', peds: 'peds' })[z.role] || 'other', title: z.title || '', place: z.place || '', look: z.look || '', character: z.character || '', speech: z.speech || '', regalia: '', knows: z.knows || '', phrases: arr(z.phrases), img: z.img || '', era: era().id };
-}
-/** Все врачи эпохи: свои + из Зёрнышка. */
-export const allDocs = () => [...docs(), ...zDocs().map(zAsDoc)];
+export function delDoc(id) { if (isZ(id)) { zDelDoc(id); return; } const m = M(); m.docs = m.docs.filter(d => d.id !== id); touch(); }
+/** Все врачи эпохи: свои + врачи Зёрнышка (Васкез, педиатр). */
+export const allDocs = () => [...docs(), ...(hasZ() ? zDocs().map(zAsDoc) : [])];
 /** Кого предложить на приём: сначала по роли, потом лечащего, потом любого. */
 export function docFor(kind, who = '') {
     const v = D.visitById(kind);
     const list = allDocs();
     if (kind === 'preg') { const z = list.find(d => d.z && d.role === 'ob'); if (z) return z; }
+    if (kind === 'peds') { const z = list.find(d => d.z && d.role === 'peds'); if (z) return z; }
     return list.find(d => v.roles.includes(d.role) && (!who || !d.who?.length || d.who.some(x => same(x, who))))
         || list.find(d => v.roles.includes(d.role)) || list.find(d => d.who?.some(x => same(x, who))) || list[0] || null;
 }
@@ -699,8 +955,14 @@ export function delRec(who, list, id) {
     p[list] = p[list].filter(x => x.id !== id);
     touch();
 }
-export function delVisit(id) { const m = M(); m.visits = m.visits.filter(v => v.id !== id); touch(); }
-export function delScan(id) { const m = M(); m.scans = m.scans.filter(s => s.id !== id); touch(); }
+export function delVisit(id) {
+    if (String(id).startsWith('zl:')) { const zm = zMeta(); if (zm) { zm.medlog = arr(zm.medlog).filter(x => x.id !== String(id).slice(3)); zSave(); } touch(); return; }
+    const m = M(); m.visits = m.visits.filter(v => v.id !== id); touch();
+}
+export function delScan(id) {
+    if (String(id).startsWith('zu:')) { zDelUS(id); return; }
+    const m = M(); m.scans = m.scans.filter(s => s.id !== id); touch();
+}
 
 // ───────────── снимки: находки ─────────────
 
@@ -805,7 +1067,7 @@ function personNote(who) {
     const bits = [];
     const pg = pregnant(who);
     if (pg) {
-        const zd = zDocs().find(d => ['ob', 'mfm', 'repro'].includes(d.role));
+        const zd = zDocs().find(d => PREG_ROLES.includes(d.role));
         bits.push(`беременность ${pg.text}${zd?.name ? ` (ведёт ${zd.name})` : ''}`);
     }
     for (const l of limits(who).slice(0, 3)) bits.push(`${l.by ? `${short(l.by)}: ` : ''}${l.t}${l.until ? ` (до ${fmtDay(l.until)})` : ''}`);
@@ -962,15 +1224,14 @@ export async function patientText(who) {
     const st = stones(who);
     if (st) out.push(`Камни Бесконечности в теле: энергия ${st.lvl}/100 — ${st.word}${st.attacks ? `; приступов за 30 дней: ${st.attacks}${st.last ? ` (последний ${fmtDay(st.last)})` : ''}` : ''}${st.tremor ? '; дрожат руки' : ''}. Перегрузки Камнями дают аритмии вплоть до остановки сердца.`);
     const pg = pregnant(who);
-    if (pg) out.push(`Беременность: ${pg.text}, ${pg.tri} триместр, до ПДР ${pg.left} дн. Акушерство ведёт врач Зёрнышка${zDocs()[0]?.name ? ` (${zDocs()[0].name})` : ''}; снимки с облучением — только по жизненным показаниям.`);
+    if (pg) { const ob = zDocs().find(d => PREG_ROLES.includes(d.role)); out.push(`Беременность: ${pg.text}, ${pg.tri} триместр, до ПДР ${pg.left} дн.${ob?.name ? ` Беременность ведёт ${ob.name}.` : ''} Снимки с облучением — только по жизненным показаниям.`); }
     const band = pregBand(who);
     if (band) out.push(`Набор веса: +${band.gain} кг от ${band.base}; по сроку норма +${band.lo}…+${band.hi} (${band.cat}).`);
     const aa = p.implants.some(x => x.kind === 'arm') ? artArm() : null;
     if (aa) out.push(`Протез по данным А.Р.Т.У.Р.а: целостность ${aa.pct}%${aa.note ? ` — ${aa.note}` : ''}.`);
     const pv = visits(who).slice(-4);
     if (pv.length) out.push(`Прошлые приёмы: ${pv.map(x => `${fmtDay(x.day)}${x.docName ? ` ${short(x.docName)}` : ''} — ${cut(x.found || x.said || '', 120)}`).join('; ')}.`);
-    const zl = pregnant(who) ? zLog(3) : [];
-    if (zl.length) out.push(`У акушера (Зёрнышко): ${zl.map(x => `${x.docName ? `${short(x.docName)}: ` : ''}${cut(x.found || x.said || x.title || '', 110)}`).join('; ')}.`);
+
     const lore = await loreOf(who, MED_LORE_RE, 2600);
     if (lore) out.push(`Из лорбуков о пациенте (тело и здоровье):\n${lore}`);
     return out.join('\n');

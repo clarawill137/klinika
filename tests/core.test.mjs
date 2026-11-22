@@ -72,9 +72,29 @@ ok('4 вес, ИМТ, давление и флаги', () => {
     assert.ok(fl.includes('60.4 кг · ИМТ 21.4') && fl.includes('86/54 ↓') && fl.includes('Камни 62'), fl);
 });
 
+// заглушки Зёрнышка: движок (дети, срок, хранилище), врачи (приём, исходы, карта), что видно на УЗИ, лицо малыша
+const ZM = { kids: [{ id: 'k1', stage: 'preg', mother: 'Хеди', preg: { us: [{ img: '/u.jpg', week: 9, at: Date.parse('2024-12-20T12:00:00') }] } }], docs: [{ id: 'v', name: 'Васкез', role: 'ob', speech: 'mija' }], medlog: [], visit: { on: 'auto', docId: '', outcome: null, options: [] } };
+const zCalls = [];
+const ZE = {
+    kids: () => ZM.kids, kidById: (id) => ZM.kids.find(k => k.id === id) || null, kidName: (k) => k.name || 'Зёрнышко', term: () => ({ ow: 10, od: 1, tri: 1, left: 205, before: false }),
+    meta: () => ZM, save: () => zCalls.push('save'), clock: () => ({ t: Date.parse('2024-12-27T10:40:00'), day: '2024-12-27' }),
+    describeUS: async () => { zCalls.push('see'); return true; }, usSeeing: () => false, usSeeErr: () => '',
+};
+const ZDoc = {
+    agenda: () => ({ items: [{ id: 'nt', name: 'Скрининг 1', note: 'УЗИ, кровь' }], routine: 'давление и пульс, вес', stamp: '10 нед 1 дн' }),
+    nextVisit: () => '24 января', visitNow: () => ({ on: ZM.visit.on === 'on', d: ZM.docs[0], why: 'включён вручную' }),
+    makeOptions: async (d) => { ZM.visit.options = [{ id: 'o1', title: 'Всё по сроку', tone: 'good', found: 'КТР 31 мм', said: 'Всё хорошо, mija', next: 'через 4 недели', comps: [], plan: ['nt'], dice: true }]; ZM.visit.optFor = { docId: d.id, kidId: 'k1' }; return ZM.visit.options; },
+    pickOption: (id) => { const o = ZM.visit.options.find(x => x.id === id); ZM.visit.outcome = { ...o, docId: ZM.visit.optFor.docId, kidId: 'k1' }; },
+    customOutcome: (t, d) => { ZM.visit.outcome = { id: 'c', title: 'Своё решение', tone: 'mixed', found: t, docId: d.id, kidId: 'k1', custom: true }; },
+    visitHappened: ({ src }) => { const o = ZM.visit.outcome; ZM.medlog.push({ id: `l${ZM.medlog.length + 1}`, at: Date.parse('2024-12-27T11:00:00'), day: '2024-12-27', docId: o?.docId || 'v', kidId: 'k1', stamp: '10 нед 1 дн', src, done: ['Скрининг 1'], found: o?.found || '', said: o?.said || '', next: o?.next || '', title: o?.title || '' }); ZM.visit.outcome = null; ZM.visit.options = []; return ['исход в карте']; },
+    fillDoc: async (d) => { d.character = 'спокойная'; return d; }, drawDoc: async (d) => { d.img = '/doc.png'; },
+};
+const ZX = { usView: (w) => ({ early: w < 11, ru: 'мармеладный мишка', en: 'a gummy-bear shaped embryo' }), weekInfo: () => ({ mm: 31 }) };
+const ZG = { faceEn: () => '' };
+
 ok('5 беременность из Зёрнышка: коридор набора', () => {
     const conception = Date.parse('2024-11-01');
-    C.setZ({ kids: () => [{ id: 'k1', stage: 'preg', mother: 'Хеди', preg: { us: [{ img: '/u.jpg', week: 9 }] } }], term: () => ({ ow: 10, od: 1, tri: 1, left: 205, before: false }), meta: () => ({ docs: [{ id: 'v', name: 'Васкез', role: 'ob' }], medlog: [] }) });
+    C.setZ(ZE, ZDoc, ZX, ZG);
     assert.equal(C.pregnant('Хеди').week, 10);
     assert.equal(C.pregnant('Bucky Barnes'), null);
     const b = C.pregBand('Хеди');
@@ -87,7 +107,7 @@ ok('5 беременность из Зёрнышка: коридор набор�
     assert.equal(C.labFlag('cbc', 'Hb', 112, 'Хеди'), '', 'Hb 112 у беременной — норма');
     assert.equal(C.labFlag('cbc', 'Hb', 104, 'Хеди'), 'low');
     assert.ok(C.allDocs().some(d => d.z && d.name === 'Васкез'));
-    assert.equal(C.zUS('Хеди').length, 1);
+    assert.equal(C.scans('Хеди', 'us').filter(x => x.img).length, 1, 'УЗИ Зёрнышка — снимок Клиники');
     void conception;
 });
 
@@ -206,6 +226,55 @@ ok('12 другой чат в 1944: тело по лору, снимок пом�
     ctx.chatMetadata = keep;
     world = w0;
     C.bump();
+});
+
+await okA('13 Васкез — врач Клиники: досье, приём движком Зёрнышка, записи, УЗИ', async () => {
+    const vas = C.docById('zr:v');
+    assert.ok(vas && vas.z && vas.zrole === 'ob');
+    assert.deepEqual(vas.who, ['Хеди']);
+    C.zDocSet('zr:v', 'title', 'акушер-гинеколог, медблок А.И.М.');
+    assert.equal(ZM.docs[0].title, 'акушер-гинеколог, медблок А.И.М.', 'правка досье — в Зёрнышко');
+    C.zDocSet('zr:v', 'phrases', 'Mija, дыши.\nВсё по сроку.');
+    assert.deepEqual(ZM.docs[0].phrases, ['Mija, дыши.', 'Всё по сроку.']);
+    let z = C.zVisit('zr:v');
+    assert.equal(z.who, 'Хеди'); assert.equal(z.ag.items[0].name, 'Скрининг 1'); assert.equal(z.next, '24 января');
+    await C.zOptions('zr:v');
+    z = C.zVisit('zr:v');
+    assert.equal(z.opts.length, 1);
+    // тихо — сразу в карту, запись в плане на сегодня проведена
+    const p = C.addPlan({ who: 'Хеди', doc: 'zr:v', kind: 'preg', d: '2024-12-27' });
+    C.zPick('zr:v', 'o1', false);
+    assert.equal(ZM.medlog.length, 1);
+    assert.equal(C.planById(p.id).st, 'done');
+    const v = C.visits('Хеди').find(x => x.z);
+    assert.ok(v && v.doc === 'zr:v' && v.kind === 'preg' && v.label === 'Всё по сроку' && v.stamp === '10 нед 1 дн', JSON.stringify(v));
+    // в сцену — приём у Зёрнышка включён, пока исход не сыгран; потом режим возвращается
+    await C.zOptions('zr:v');
+    C.zPick('zr:v', 'o1', true);
+    assert.equal(ZM.visit.on, 'on'); assert.equal(ZM.visit.docId, 'v'); assert.ok(C.M().zOn);
+    assert.equal(C.zRestore(), false, 'исход ещё не сыгран');
+    ZDoc.visitHappened({ src: 'bot' });
+    assert.equal(C.zRestore(), true);
+    assert.equal(ZM.visit.on, 'auto'); assert.equal(ZM.medlog.length, 2);
+    // своё и «уже было»
+    C.zCustom('zr:v', 'ТВП 1,4 мм, всё чисто', false);
+    assert.equal(ZM.medlog.at(-1).found, 'ТВП 1,4 мм, всё чисто');
+    // убрать запись и снимок — из Зёрнышка
+    C.delVisit(`zl:${ZM.medlog[0].id}`);
+    assert.equal(ZM.medlog.length, 2);
+    const us = C.scans('Хеди', 'us').find(x => x.img);
+    C.delScan(us.id);
+    assert.equal(ZM.kids[0].preg.us.length, 0);
+    // новый снимок УЗИ рисуется, как в Зёрнышке, и лежит у него
+    api.drawPicture = async (prompt) => { assert.ok(prompt.includes('10 weeks 1 days') && prompt.includes('crown-rump length about 31 mm') && prompt.includes('not a 12-week baby')); return '/us10.png'; };
+    const id = await C.zDrawUS('Хеди');
+    assert.equal(ZM.kids[0].preg.us.length, 1);
+    assert.ok(C.scanById(id)?.img === '/us10.png');
+    assert.ok(zCalls.includes('see'), 'боты смотрят на новый снимок');
+    // выключить — врачи Зёрнышка не ведутся здесь
+    C.cfg().zdocs = false;
+    assert.equal(C.visits('Хеди').filter(x => x.z).length, 0);
+    C.cfg().zdocs = true;
 });
 
 console.log(`\nВсе ${n} блоков зелёные.`);

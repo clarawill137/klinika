@@ -76,6 +76,7 @@ export const VISITS = [
     { id: 'psych', name: 'Терапия', ico: 'chat', scans: [], labs: [], vit: false, roles: ['psych'] },
     { id: 'dent', name: 'Стоматолог', ico: 'tooth', scans: ['xray'], labs: [], vit: false, roles: ['dent'] },
     { id: 'preg', name: 'Беременность', ico: 'baby', scans: ['us'], labs: ['cbc'], vit: true, w: true, roles: ['ob', 'chief', 'research'] },
+    { id: 'peds', name: 'Педиатр', ico: 'baby', scans: [], labs: [], vit: true, w: true, roles: ['peds'] },
     { id: 'custom', name: 'Своё', ico: 'notes', scans: [], labs: [], vit: false, roles: [] },
 ];
 export const visitById = (id) => VISITS.find(v => v.id === id) || VISITS[VISITS.length - 1];

@@ -18,6 +18,7 @@ function register() {
         prompt: (type) => C.promptNote(type),
         chron: (i) => C.chronHook(i),
         afterPost: (i, j, m) => {
+            try { C.zRestore(); } catch { /* */ }
             const t = C.afterPost(i, j, m);
             if (t.length) C.toast('info', t.slice(0, 4).map(C.esc).join(' · '));
             U.renderSoon();
@@ -66,6 +67,7 @@ function settingsDrawer() {
             <label class="checkbox_label"><input type="checkbox" data-klc="dice" ${s.dice ? 'checked' : ''}> Кубик подсказывает, какой исход приёма «выпал»</label>
             <label class="checkbox_label"><input type="checkbox" data-klc="scene" ${s.scene ? 'checked' : ''}> Приём по умолчанию «в сцену» — модель играет его в ответе</label>
             <label class="checkbox_label"><input type="checkbox" data-klc="artur" ${s.artur ? 'checked' : ''}> «Медблок» в Арте открывает Клинику</label>
+            <label class="checkbox_label"><input type="checkbox" data-klc="zdocs" ${s.zdocs !== false ? 'checked' : ''}> Врачи Зёрнышка (Васкез, педиатр) ведутся в Клинике: приём, записи, УЗИ, досье</label>
             <label class="checkbox_label"><input type="checkbox" data-klc="fx" ${s.fx ? 'checked' : ''}> Анимации</label>
             <label>Заметка модели <select data-klc="prompt">${opt('auto', s.prompt, 'когда есть что сказать')}${opt('always', s.prompt, 'всегда')}${opt('off', s.prompt, 'выкл')}</select></label>
             <label>Исходы, досье и снимки пишет <select data-klc="model">${opt('deep', s.model, 'умная модель Life')}${opt('chron', s.model, 'модель Летописца')}</select></label>
@@ -104,6 +106,8 @@ function registerSlash() {
 globalThis.Klinika = {
     version: C.VERSION,
     open: (tab, who) => U.open(tab || null, who || null),
+    /** Страница врача: свой id или id врача Зёрнышка (с «zr:» или без). */
+    openDoc: (id) => { const s = String(id || ''); U.openDoc(C.isZ(s) || C.M().docs.some(d => d.id === s) ? s : `zr:${s}`); },
     openMed: (who) => U.open('today', who || null),
     has: () => !!C.cfg().on && C.cfg().artur !== false,
     flags: (who) => { try { return C.flags(who); } catch { return []; } },
@@ -120,12 +124,24 @@ function arturHook(e) {
     U.open('today');
 }
 
+/** Васкез (и другие врачи Зёрнышка) живут в Клинике: тап по врачу в хабе Life открывает её страницу здесь. */
+function zrHook(e) {
+    if (!C.cfg().on || !C.hasZD()) return;
+    const el = e.target.closest?.('[data-zact="doc-open"]');
+    if (!el || el.closest('#kl-dialog') || !el.dataset.id) return;
+    if (!C.zDocRaw(el.dataset.id)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    U.openDoc(`zr:${el.dataset.id}`);
+}
+
 jQuery(async () => {
     C.cfg();
     document.addEventListener('click', U.onClick, true);
     document.addEventListener('change', U.onChange);
     document.addEventListener('input', U.onInput);
     window.addEventListener('click', arturHook, true);
+    window.addEventListener('click', zrHook, true);
     settingsDrawer();
     registerSlash();
     if (!addWand()) { let t = 0; const iv = setInterval(() => { if (addWand() || ++t > 40) clearInterval(iv); }, 500); }
@@ -141,6 +157,7 @@ jQuery(async () => {
             if (!api || type === 'impersonate') return;
             const i = Number(id);
             if (Number.isFinite(i)) C.spendShots(i);
+            try { C.zRestore(); } catch { /* */ }
             refresh();
         };
         if (E.CHARACTER_MESSAGE_RENDERED) eventSource.on(E.CHARACTER_MESSAGE_RENDERED, onAi);

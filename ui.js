@@ -73,9 +73,10 @@ function scanCtx(s) {
     return { name: C.canon(s.who).toUpperCase(), date: C.fmtDay(s.day, true), place: e.title.toUpperCase(), implants: sn ? sn.impl || [] : p.implants, sex: p.sex, preg: week != null, week, paper: PAPER.includes(e.id), lvl: st?.lvl ?? 40, cracks: sn ? sn.cracks || [] : p.cracks, tremor: !!st?.tremor };
 }
 function scanSvg(s, thumb = false) {
+    if (s.img) return `<img class="kl-usimg" src="${esc(s.img)}" alt="" loading="lazy">`;
     try { return S.render(s, { ...scanCtx(s), thumb }); } catch (e) { console.warn('[Клиника] снимок', e); return ''; }
 }
-const scanTitle = (s) => `${D.SCANS[s.kind]?.name || s.kind}${s.area && s.kind !== 'stones' && s.kind !== 'ecg' ? ` · ${D.areaName(s.kind, s.area).toLowerCase()}` : ''}`;
+const scanTitle = (s) => (s.img && s.kind === 'us' ? `УЗИ · ${s.imp || 'беременность'}` : `${D.SCANS[s.kind]?.name || s.kind}${s.area && s.kind !== 'stones' && s.kind !== 'ecg' ? ` · ${D.areaName(s.kind, s.area).toLowerCase()}` : ''}`);
 
 // ───────────── окно ─────────────
 
@@ -155,6 +156,7 @@ function todayHtml() {
     ${sec('Сегодня', today ? esc(C.fmtDay(today)) : 'дата неизвестна')}
     ${list.length ? `<div class="kl-list">${list.map(planCard).join('')}</div>` : empty('На сегодня никто не записан.')}
     ${patSummary(who)}
+    ${arturHtml()}
     ${sec('Последние приёмы')}
     ${visitFeed(C.visits().slice(-8).reverse())}`;
 }
@@ -174,10 +176,25 @@ function patSummary(who) {
     return `<div class="kl-sum">${ava(who, 'lg')}<div class="kl-sum-b"><b>${esc(C.canon(who))}</b>
     <div class="kl-flags">${fl.map(x => chip(x.t, x.cls)).join('') || '<span class="kl-mute">Медкарта пустая — можно начать с приёма или веса.</span>'}</div></div></div>
     ${st ? stonesGauge(st, who) : ''}
-    ${pg ? `<div class="kl-row kl-preg">${ic('baby')}<span>Беременность · ${esc(pg.text)} · ${pg.tri} триместр · до ПДР ${pg.left} дн</span>${btn('openZ', 'Зёрнышко', '', 'sm ghost')}</div>` : ''}
+    ${pg ? pregRow(who, pg) : ''}
     ${lim.length ? `<div class="kl-lims">${lim.map(l => `<div>${ic('alert')}<span>${esc(l.t)}${l.until ? ` <small>до ${esc(C.fmtDay(l.until))}</small>` : ''}${l.by ? ` <small>· ${esc(C.short(l.by))}</small>` : ''}</span></div>`).join('')}</div>` : ''}
     ${ms.length ? `<div class="kl-meds">${ms.slice(0, 5).map(m => `<span>${ic('pill')}${esc(m.name)}${m.dose ? ` <small>${esc(m.dose)}</small>` : ''}</span>`).join('')}</div>` : ''}
     <div class="kl-row end">${btn('tab', `Медкарта ${ic('arrow')}`, attr({ v: 'pats' }), 'sm ghost')}</div>`;
+}
+function pregRow(who, pg) {
+    const ob = C.allDocs().find(d => d.z && d.role === 'ob');
+    return `<div class="kl-row kl-preg">${ic('baby')}<span>Беременность · ${esc(pg.text)} · ${pg.tri} триместр · до ПДР ${pg.left} дн${ob ? ` · ведёт ${esc(C.docShort(ob))}` : ''}</span></div>
+    <div class="kl-row end">${ob && C.hasZD() ? btn('newVisit', `${ic('stetho')} Приём · ${esc(C.docShort(ob))}`, attr({ who, doc: ob.id, vk: 'preg' }), 'sm') : ''}${btn('openZ', 'Зёрнышко', '', 'sm ghost')}</div>`;
+}
+/** Лазарет и пульт Арта: Камни, протез Баки и раненых ведёт он (Летописец Арта), здесь — видно и одна кнопка к пульту. */
+function arturHtml() {
+    const Ar = globalThis.Artur;
+    const live = !!Ar?.open && !Ar.asleep?.();
+    const pats = C.artPatients().filter(p => !p.era || p.era === C.era().id);
+    if (!live && !pats.length) return '';
+    const st = { hurt: ['ранен', 'bad'], heal: ['лечится', 'warn'] };
+    return `${sec('Лазарет Арта', live ? btn('arturMed', `${ic('wrench')} Пульт Арта`, '', 'sm ghost') : '')}
+    ${pats.length ? `<div class="kl-recs">${pats.map(p => `<div><span><b>${esc(p.name)}</b>${p.note ? ` <small>${esc(C.cut(p.note, 90))}</small>` : ''}</span>${chip((st[p.state] || ['ранен', 'bad'])[0], (st[p.state] || ['', 'bad'])[1])}</div>`).join('')}</div>` : '<div class="kl-hint">В лазарете Арта никого. Камни, протез Баки и раненых он ведёт сам — на пульте.</div>'}`;
 }
 function stonesGauge(st, who) {
     const cls = st.lvl >= 70 ? 'bad' : st.lvl >= 35 ? 'warn' : 'ok';
@@ -191,7 +208,7 @@ function visitFeed(list) {
     return `<div class="kl-list">${list.map(v => {
         const d = C.docById(v.doc) || (v.docName ? { name: v.docName } : null);
         return `<button class="kl-card visit ${toneCls(v.tone)}" data-k="visitView" data-id="${esc(v.id)}">${docAva(d, 'sm')}<div class="kl-card-b">
-        <div class="kl-card-h"><b>${esc(C.short(v.who))}${v.docName ? ` · ${esc(C.short(v.docName))}` : ''}</b>${v.tone ? chip(toneWord(v.tone), toneCls(v.tone)) : v.src === 'post' ? chip('из поста') : ''}<span class="kl-date">${esc(C.fmtDay(v.day))}</span></div>
+        <div class="kl-card-h"><b>${esc(C.short(v.who))}${v.docName ? ` · ${esc(d?.z ? C.docShort(d) : C.short(v.docName))}` : ''}</b>${v.tone ? chip(toneWord(v.tone), toneCls(v.tone)) : v.src === 'post' ? chip('из поста') : v.stamp ? chip(v.stamp, 'on') : ''}<span class="kl-date">${esc(C.fmtDay(v.day))}</span></div>
         ${v.label && v.label !== 'Своё' ? `<div class="kl-card-t">${esc(v.label)}</div>` : ''}<div class="kl-card-s">${esc(C.cut(v.found || v.said || '', 150))}</div></div></button>`;
     }).join('')}</div>`;
 }
@@ -273,9 +290,7 @@ function patHtml() {
 
     ${st || p.cracks.length ? `${sec('Камни')}${st ? stonesGauge(st, who) : ''}<div class="kl-hint">Где трещины на карте Камней:</div><div class="kl-chips wrap">${D.CRACK_SPOTS.map(([id, l]) => `<button class="kl-chip ${p.cracks.includes(id) ? 'on' : ''}" data-k="crack" data-who="${esc(k)}" data-v="${id}">${esc(l)}</button>`).join('')}</div>` : ''}
 
-    ${pg ? `${sec('Беременность', '<small>Зёрнышко</small>')}<div class="kl-row kl-preg">${ic('baby')}<span>${esc(pg.text)} · ${pg.tri} триместр · до ПДР ${pg.left} дн</span>${btn('openZ', 'Открыть', '', 'sm ghost')}</div>
-    ${C.zLog(4).map(x => `<div class="kl-zlog"><small>${esc(x.docName || 'врач')}${x.title ? ` · ${esc(x.title)}` : ''}</small><p>${esc(C.cut(x.found || x.said || '', 220))}</p></div>`).join('')}
-    ${C.zUS(who).length ? `<div class="kl-thumbs">${C.zUS(who).slice(-4).reverse().map(x => `<button class="kl-thumb img" data-k="zoomImg" data-src="${esc(x.img)}"><img src="${esc(x.img)}" alt="" loading="lazy"><span>${x.week} нед</span></button>`).join('')}</div>` : ''}` : ''}
+    ${pg ? `${sec('Беременность')}${pregRow(who, pg)}` : ''}
 
     ${sec('Снимки', btn('newScan', ic('plus'), attr({ who }), 'ico sm'))}
     ${scans.length ? `<div class="kl-thumbs">${scans.map(scanThumb).join('')}</div>` : empty('Снимков нет.')}
@@ -306,10 +321,10 @@ function scansHtml() {
 
 function docsHtml() {
     const own = C.docs();
-    const z = C.zDocs().map(C.zAsDoc);
+    const z = C.hasZ() ? C.zDocs().map(C.zAsDoc) : [];
     const other = C.docs(true).filter(d => d.era !== C.era().id);
-    const card = (d) => `<button class="kl-card doc" data-k="docView" data-id="${esc(d.id)}">${docAva(d, 'md')}<div class="kl-card-b"><div class="kl-card-h"><b>${esc(d.name)}</b>${d.z ? chip('Зёрнышко', 'on') : ''}</div>
-        <div class="kl-card-s">${esc(d.title || D.roleName(d.role))}${d.place ? ` · ${esc(d.place)}` : ''}</div>${d.who?.length ? `<div class="kl-card-s">ведёт: ${d.who.map(n => esc(C.short(n))).join(', ')}</div>` : ''}</div></button>`;
+    const card = (d) => `<button class="kl-card doc" data-k="docView" data-id="${esc(d.id)}">${docAva(d, 'md')}<div class="kl-card-b"><div class="kl-card-h"><b>${esc(d.name)}</b>${d.z && C.zVisit(d.id)?.here ? chip('приём идёт', 'on') : ''}</div>
+        <div class="kl-card-s">${esc(d.z ? C.Z_ROLES[d.zrole] || D.roleName(d.role) : d.title || D.roleName(d.role))}${d.place ? ` · ${esc(d.place)}` : ''}</div>${d.who?.length ? `<div class="kl-card-s">ведёт: ${d.who.map(n => esc(C.short(n))).join(', ')}</div>` : ''}</div></button>`;
     return `<div class="kl-actions">${btn('newDoc', `${ic('plus')} Врач`, '', 'primary')}${btn('suggDocs', busy('sugg') ? spin : `${ic('sparkles')} Найти в лорбуках`)}</div>
     ${sec(esc(C.era().title), String(own.length + z.length))}
     ${own.length || z.length ? `<div class="kl-list">${own.map(card).join('')}${z.map(card).join('')}</div>` : empty('Врачей этой эпохи нет. «Найти в лорбуках» — предложу из её истории.')}
@@ -357,16 +372,19 @@ function closeModal() {
 const sheetHead = (title, right = '') => `<div class="kl-sheet-h"><b>${title}</b>${right}<button class="kl-x" data-k="closeModal">${ic('x')}</button></div>`;
 
 // приём: выбор, три исхода, своё
+const docLine = (d) => `${d.name}${d.z ? ` — ${(C.Z_ROLES[d.zrole] || '').toLowerCase()}` : d.title ? ` — ${d.title}` : ''}`;
+function docSelect(m) {
+    return field('Врач', `<select data-kf="vm:doc">${[['', '— дежурный врач —'], ...C.allDocs().map(d => [d.id, docLine(d)])].map(([id, l]) => `<option value="${esc(id)}" ${id === m.doc ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`);
+}
 function visitSheet() {
     const m = ui.modal;
-    const docs = C.allDocs();
+    if (C.isZ(m.doc) && C.hasZD()) return `<div class="kl-sheet">${sheetHead('Приём')}${docSelect(m)}${zVisitPanel(m.doc, true)}</div>`;
     const v = D.visitById(m.vk);
     const busyGo = busy('visit');
     return `<div class="kl-sheet">${sheetHead('Приём')}
     ${whoChips(m.who, 'vmWho')}
-    ${field('Врач', `<select data-kf="vm:doc">${[['', '— дежурный врач —'], ...docs.map(d => [d.id, `${d.name}${d.title ? ` — ${d.title}` : ''}`])].map(([id, l]) => `<option value="${esc(id)}" ${id === m.doc ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`)}
+    ${docSelect(m)}
     <div class="kl-chips wrap">${D.VISITS.map(x => `<button class="kl-chip ${m.vk === x.id ? 'on' : ''}" data-k="vmKind" data-v="${x.id}">${ic(x.ico)}${esc(x.name)}</button>`).join('')}</div>
-    ${m.vk === 'preg' && C.zDocs().length ? `<div class="kl-hint">${ic('baby')} Акушерские осмотры с исходами ведёт Зёрнышко — здесь тот же приём глазами клиники (вес, давление, анализы, Камни и плод).</div>` : ''}
     ${field('Причина', `<input data-kf="vm:reason" value="${esc(m.reason || '')}" placeholder="плановый, болит плечо, после приступа…">`)}
     ${field('Чего хочешь от исхода', `<input data-kf="vm:wish" value="${esc(m.wish || '')}" placeholder="необязательно: «пусть найдут анемию»">`)}
     <div class="kl-seg">${[['1', `${ic('chat')} В сцену — модель сыграет приём`], ['0', `${ic('notes')} Тихо — только в медкарту`]].map(([val, l]) => `<button class="${String(m.scene ? 1 : 0) === val ? 'on' : ''}" data-k="vmScene" data-v="${val}">${l}</button>`).join('')}</div>
@@ -376,6 +394,41 @@ function visitSheet() {
     ${(m.opts || []).map((o, i) => optCard(o, i, m)).join('')}
     <div class="kl-hint">${esc(v.name)}${v.scans.length ? ` · обычно: ${v.scans.filter(C.scanOk).map(s => D.SCANS[s].name).join(', ') || 'без снимков в эту эпоху'}` : ''}${v.labs.length ? ` · анализы: ${v.labs.map(p => D.LABS[p].name.toLowerCase()).join(', ')}` : ''}</div></div>`;
 }
+// ───────────── приём у врача Зёрнышка (Васкез, педиатр): его движок — план, кубики, исходы; здесь — окно ─────────────
+
+const Z_TONE = { good: ['спокойно', 'ok'], mixed: ['тревожно, но поправимо', 'warn'], bad: ['плохие новости', 'bad'] };
+function zOptCard(o, id, chosen = false) {
+    const [tw, tc] = Z_TONE[o.tone] || Z_TONE.mixed;
+    return `<div class="kl-opt ${tc}"><div class="kl-opt-h"><b>${o.dice ? `${ic('dice')} ` : ''}${esc(o.title)}</b>${chip(o.dice ? 'как выпало' : tw, tc)}</div>
+    ${o.found ? `<p>${esc(o.found)}</p>` : ''}${o.said ? `<blockquote>${esc(o.said)}</blockquote>` : ''}${o.next ? `<div class="kl-hint">${ic('calendar')} ${esc(o.next)}</div>` : ''}
+    ${chosen ? '' : `<div class="kl-row end">${btn('zPick', `${ic('check')} Этот`, attr({ id, v: o.id }), 'primary')}</div>`}</div>`;
+}
+/** Приём у врача Зёрнышка. wizard — открыт из «＋ Приём» (тогда без переключателя режима Зёрнышка). */
+function zVisitPanel(id, wizard = false) {
+    const z = C.zVisit(id);
+    if (!z) return empty('Зёрнышко не подключилось — приём у этого врача пока не провести.');
+    const scene = ui.modal?.scene ?? C.cfg().scene;
+    const sceneSeg = `<div class="kl-seg">${[['1', `${ic('chat')} В сцену — модель сыграет`], ['0', `${ic('notes')} Тихо — сразу в карту`]].map(([val, l]) => `<button class="${String(scene ? 1 : 0) === val ? 'on' : ''}" data-k="vmScene" data-v="${val}">${l}</button>`).join('')}</div>`;
+    const state = z.here ? ['Приём идёт', z.why || '', 'warn'] : z.on === 'off' ? ['Приём выключен', 'Врач молчит даже в клинике', ''] : ['Не на приёме', 'Включится сам по месту и имени — или выбери исход «в сцену»', ''];
+    return `${z.k ? `<div class="kl-sum">${ava(z.who, 'lg')}<div class="kl-sum-b"><b>${esc(z.who)}</b><div class="kl-flags">${z.ag.stamp ? chip(z.ag.stamp, 'on') : ''}${C.flags(z.who).filter(f => f.cls === 'warn' || f.cls === 'bad').slice(0, 3).map(f => chip(f.t, f.cls)).join('')}</div></div></div>` : empty('Пациента под роль этого врача пока нет.')}
+    <div class="kl-state ${state[2]}"><b>${state[0]}</b><span>${esc(state[1])}</span></div>
+    ${wizard ? '' : `<div class="kl-seg sm">${[['auto', 'Сам'], ['on', 'Идёт'], ['off', 'Нет']].map(([v, l]) => `<button class="${z.on === v ? 'on' : ''}" data-k="zOn" data-id="${esc(id)}" data-v="${v}">${l}</button>`).join('')}</div>`}
+    ${z.k ? `${sec('Сегодня на приёме', esc(z.ag.stamp || ''))}
+    ${z.ag.routine ? `<div class="kl-hint">${esc(z.ag.routine)}.</div>` : ''}
+    ${z.ag.items.length ? `<div class="kl-recs">${z.ag.items.map(x => `<div><span><b>${esc(x.name)}</b>${x.note ? ` <small>${esc(x.note)}</small>` : ''}</span></div>`).join('')}</div>` : '<div class="kl-hint">Особых обследований сейчас нет — плановый осмотр.</div>'}
+    ${z.next ? `<div class="kl-hint">${ic('calendar')} Следующий приём: ${esc(z.next)}</div>` : ''}
+    ${z.today ? `<div class="kl-band ok">${ic('check')}<span>Сегодня приём уже в карте: «${esc(z.today.title || (z.today.done || []).join(', ') || 'приём')}». ${z.out ? 'Этот исход допишется в ту же запись.' : 'Новый исход — разве что второй приём за день.'}</span></div>` : ''}
+    ${sec('Исход', z.out ? 'выбран' : 'на выбор')}
+    ${z.out ? `${zOptCard(z.out, id, true)}<div class="kl-actions">${btn('zDone', `${ic('check')} Уже было — в карту`, attr({ id }), 'primary')}${btn('zUnpick', `${ic('x')} Отменить`, attr({ id }), 'ghost')}</div>
+        <div class="kl-hint">Исход уходит модели, пока идёт приём. Как только в посте прозвучит врач — запишется в карту сам.</div>`
+        : `${sceneSeg}
+        ${z.opts.map(o => zOptCard(o, id)).join('')}
+        ${btn('zOpts', busy(`zopts:${id}`) ? `${spin} Думаю…` : `${ic('dice')} ${z.opts.length ? 'Другие варианты' : 'Предложить варианты'}`, attr({ id }), `${z.opts.length ? '' : 'primary '}wide`)}
+        ${field('Или своё', `<textarea rows="2" data-kf="zv:custom" placeholder="что увидят и что скажет врач — коротко">${esc(ui.modal?.zcustom || '')}</textarea>`)}
+        <div class="kl-row end">${btn('zCustom', `${ic('check')} Так и будет`, attr({ id }), 'ghost')}</div>
+        <div class="kl-hint">Варианты, кубики осложнений и план беременности считает Зёрнышко. Без выбора врач скажет то, что выпало на кубиках (или «норма»).</div>`}` : ''}`;
+}
+
 function optCard(o, i, m) {
     const nums = [];
     if (o.vit.sys) nums.push([`${o.vit.sys}/${o.vit.dia}`, C.vitalFlag('sys', o.vit.sys, m.who) || C.vitalFlag('dia', o.vit.dia, m.who)]);
@@ -403,7 +456,8 @@ function visitViewSheet() {
     const labs = C.P(v.who).labs.filter(l => l.visit === v.id);
     const vit = C.P(v.who).vitals.find(x => x.visit === v.id);
     return `<div class="kl-sheet">${sheetHead(`${esc(C.short(v.who))} · ${esc(C.fmtDay(v.day, true))}`)}
-    <div class="kl-sum">${docAva(d, 'lg')}<div class="kl-sum-b"><b>${esc(d?.name || 'врач')}</b><div class="kl-flags">${chip(D.visitById(v.kind).name)}${v.tone ? chip(toneWord(v.tone), toneCls(v.tone)) : ''}${v.scene ? chip('в сцене', 'on') : ''}${v.src === 'post' ? chip('из поста') : ''}</div></div></div>
+    <div class="kl-sum">${docAva(d, 'lg')}<div class="kl-sum-b"><b>${esc(d?.name || 'врач')}</b><div class="kl-flags">${chip(D.visitById(v.kind).name)}${v.stamp ? chip(v.stamp, 'on') : ''}${v.tone ? chip(toneWord(v.tone), toneCls(v.tone)) : ''}${v.scene ? chip('в сцене', 'on') : ''}${v.src === 'post' ? chip('из поста') : ''}${v.z ? chip(Z_SRC[v.zsrc] || 'запись') : ''}</div></div></div>
+    ${v.z && v.label && v.label !== 'Приём' ? `<div class="kl-card-t">${esc(v.label)}</div>` : ''}
     ${v.reason ? `<div class="kl-hint">Причина: ${esc(v.reason)}</div>` : ''}
     ${v.found ? `${sec('Что нашли')}<p class="kl-p">${esc(v.found)}</p>` : ''}
     ${v.said ? `${sec('Врач сказал')}<blockquote>${esc(v.said)}</blockquote>` : ''}
@@ -412,12 +466,23 @@ function visitViewSheet() {
     ${sc.length ? `${sec('Снимки')}<div class="kl-thumbs">${sc.map(scanThumb).join('')}</div>` : ''}
     ${v.plan?.length ? `${sec('Дальше')}<ul class="kl-plan">${v.plan.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
     ${v.limits?.length ? `<div class="kl-lims">${v.limits.map(l => `<div>${ic('alert')}<span>${esc(l.t)}${l.until ? ` <small>до ${esc(C.fmtDay(l.until))}</small>` : ''}</span></div>`).join('')}</div>` : ''}
-    ${v.next?.d ? `<div class="kl-hint">${ic('calendar')} Следующий приём: ${esc(C.fmtDay(v.next.d, true))}</div>` : ''}
-    ${v.src !== 'post' ? `<div class="kl-row end">${btn('delVisit', `${ic('trash')} Удалить приём`, attr({ id: v.id }), 'sm ghost danger')}</div>` : '<div class="kl-hint">Записан Летописцем из поста — уйдёт сам, если пост свайпнуть или удалить.</div>'}</div>`;
+    ${v.next?.d ? `<div class="kl-hint">${ic('calendar')} Следующий приём: ${esc(C.fmtDay(v.next.d, true))}</div>` : v.next?.note ? `<div class="kl-hint">${ic('calendar')} Дальше: ${esc(v.next.note)}</div>` : ''}
+    ${v.z && v.mes != null ? `<div class="kl-hint">Пост #${esc(v.mes)}</div>` : ''}
+    ${v.src !== 'post' ? `<div class="kl-row end">${btn('delVisit', `${ic('trash')} ${v.z ? 'Убрать запись' : 'Удалить приём'}`, attr({ id: v.id }), 'sm ghost danger')}</div>` : '<div class="kl-hint">Записан Летописцем из поста — уйдёт сам, если пост свайпнуть или удалить.</div>'}</div>`;
 }
+const Z_SRC = { bot: 'из поста бота', user: 'из твоего поста', manual: 'вручную', pick: 'исход', hand: 'вручную' };
 function scanSheet() {
     const s = ui.modal.scan || C.scanById(ui.modal.id);
     if (!s) return `<div class="kl-sheet">${sheetHead('Снимок')}${empty('Снимка больше нет.')}</div>`;
+    if (s.img) {
+        const seeing = C.zUSBusy(s.id) || busy(`see:${s.id}`);
+        return `<div class="kl-sheet wide">${sheetHead(`${esc(scanTitle(s))} · ${esc(C.short(s.who))}`)}
+        <div class="kl-scanbig img"><img src="${esc(s.img)}" alt="" data-k="zoomImg" data-src="${esc(s.img)}"></div>
+        ${sec('Так его видят боты', s.descOwn ? '<small>твоими словами</small>' : '')}
+        ${s.text ? `<p class="kl-p">${esc(s.text)}</p>` : '<div class="kl-hint">Ещё не описан — боты пока знают только срок.</div>'}
+        <div class="kl-hint">${esc(C.fmtDay(s.day, true))}${s.by ? ` · ведёт ${esc(s.by)}` : ''}${s.src === 'hand' ? ' · своё фото' : ''}</div>
+        <div class="kl-row end">${btn('zSee', seeing ? `${spin} Смотрят…` : `${ic('eye')} Пусть посмотрят ещё раз`, attr({ id: s.id }), 'sm ghost')}${btn('delScan', `${ic('trash')} Убрать`, attr({ id: s.id }), 'sm ghost danger')}</div></div>`;
+    }
     return `<div class="kl-sheet wide">${sheetHead(`${esc(scanTitle(s))} · ${esc(C.short(s.who))}`)}
     <div class="kl-scanbig">${scanSvg(s)}</div>
     ${s.finds?.length ? `<ol class="kl-finds">${s.finds.map(f => `<li class="${f.sev >= 3 ? 'bad' : ''}"><b>${esc(f.t || f.part)}</b>${f.part && f.part !== f.t ? ` <small>${esc(f.part)}</small>` : ''}</li>`).join('')}</ol>` : ''}
@@ -442,6 +507,8 @@ function newScanSheet() {
     <div class="kl-scanbig">${scanSvg(s)}</div>
     ${(m.finds || []).length ? `<ol class="kl-finds">${m.finds.map((f, i) => `<li><b>${esc(f.t || f.part)}</b>${btn('nsDelFind', ic('x'), attr({ i }), 'ico sm ghost')}</li>`).join('')}</ol>` : ''}
     ${m.text ? `<p class="kl-p">${esc(m.text)}</p>` : ''}${m.imp ? `<div class="kl-imp-t"><small>Заключение</small><b>${esc(m.imp)}</b></div>` : ''}
+    ${m.kindS === 'us' && m.area === 'preg' && C.pregnant(m.who) && C.hasZD() ? `<div class="kl-band ok">${ic('baby')}<span>Настоящий снимок УЗИ беременности рисует Зёрнышко — по сроку и генам; он ляжет в карту, и боты увидят именно его. Схема ниже — для черновика.</span></div>
+    <div class="kl-actions">${btn('zDrawUS', busy('zus') ? `${spin} Рисую…` : `${ic('scan')} Снимок УЗИ (${C.pregnant(m.who).week} нед)`, attr({ who: m.who }), 'primary')}<label class="kl-btn">${ic('upload')} Своё фото<input type="file" accept="image/*" data-kup="zus" data-id="${esc(m.who)}" hidden></label></div>` : ''}
     <div class="kl-actions">${m.kindS !== 'stones' && m.kindS !== 'ecg' && m.kindS !== 'us' ? btn('nsWounds', `${ic('bone')} По ранам Life`) : ''}${btn('nsAi', busy('ns') ? spin : `${ic('sparkles')} Описать по истории`)}${btn('nsFind', `${ic('plus')} Находка`)}</div>
     ${field('Описание', `<textarea rows="3" data-kf="ns:text" placeholder="что видно на снимке">${esc(m.text || '')}</textarea>`)}
     ${field('Заключение', `<input data-kf="ns:imp" value="${esc(m.imp || '')}" placeholder="коротко">`)}
@@ -460,11 +527,7 @@ function docSheet() {
     const d = C.docById(ui.modal.id);
     if (!d) return `<div class="kl-sheet">${sheetHead('Врач')}${empty('Врача больше нет.')}</div>`;
     if (ui.modal.lore === undefined) { ui.modal.lore = null; C.loreOf(d.name, null, 2400).then(t => { if (ui.modal?.id === d.id) { ui.modal.lore = t || ''; paintModal(); } }); }
-    if (d.z) {
-        return `<div class="kl-sheet">${sheetHead(esc(d.name))}<div class="kl-sum">${docAva(d, 'lg')}<div class="kl-sum-b"><b>${esc(d.name)}</b><div class="kl-flags">${chip(D.roleName(d.role))}${chip('Зёрнышко', 'on')}</div></div></div>
-        ${[['character', 'Характер'], ['speech', 'Речь'], ['look', 'Внешность'], ['knows', 'Ведёт']].filter(([k]) => d[k]).map(([k, l]) => `${sec(l)}<p class="kl-p">${esc(d[k])}</p>`).join('')}
-        <div class="kl-hint">Этот врач живёт в Зёрнышке — правится там.</div><div class="kl-row end">${btn('openZ', 'Открыть Зёрнышко', '', 'sm')}</div></div>`;
-    }
+    if (d.z) return zDocSheet(d);
     const id = d.id;
     return `<div class="kl-sheet">${sheetHead(esc(d.name))}
     <div class="kl-docimg">${d.img ? `<img src="${esc(d.img)}" alt="" data-k="zoomImg" data-src="${esc(d.img)}">` : docAva(d, 'xl')}
@@ -483,6 +546,39 @@ function docSheet() {
     ${sec('Из лорбуков', btn('docFill', busy(`fill:${id}`) ? spin : `${ic('sparkles')} Разобрать в досье`, attr({ id }), 'sm'))}
     ${ui.modal.lore === null ? `<div class="kl-hint">${spin} читаю лорбуки…</div>` : ui.modal.lore ? `<pre class="kl-lore">${esc(C.cut(ui.modal.lore, 2400))}</pre>` : '<div class="kl-hint">В активных лорбуках про этого врача ничего нет — модель возьмёт поля досье.</div>'}
     <div class="kl-row end">${btn('delDoc', `${ic('trash')} Удалить врача`, attr({ id }), 'sm ghost danger')}</div></div>`;
+}
+/** Врач Зёрнышка — врач Клиники: приём его движком, карта (её записи), УЗИ, досье (правится здесь, лежит в Зёрнышке). */
+function zDocSheet(d) {
+    const id = d.id;
+    const tab = ui.modal.ztab || 'visit';
+    const preg = ['ob', 'mfm', 'repro'].includes(d.zrole);
+    const tabs = [['visit', 'Приём'], ['card', 'Карта'], ...(preg ? [['us', 'УЗИ']] : []), ['file', 'Досье']];
+    let body = '';
+    if (tab === 'visit') body = zVisitPanel(id);
+    else if (tab === 'card') {
+        const list = C.visits().filter(v => v.doc === id).reverse();
+        body = list.length ? visitFeed(list) : empty('Карта пустая. Приёмы запишутся сами — из постов, из выбранных исходов и вручную.');
+    } else if (tab === 'us') {
+        const who = d.who?.[0] || C.userName();
+        const list = C.scans(who, 'us').filter(x => x.img).reverse();
+        const pg = C.pregnant(who);
+        body = `<div class="kl-actions">${pg ? btn('zDrawUS', busy('zus') ? `${spin} Рисую…` : `${ic('scan')} Снимок (${pg.week} нед)`, attr({ who }), 'primary') : ''}${pg ? `<label class="kl-btn">${ic('upload')} Своё фото<input type="file" accept="image/*" data-kup="zus" data-id="${esc(who)}" hidden></label>` : ''}</div>
+        ${list.length ? `<div class="kl-thumbs big">${list.map(scanThumb).join('')}</div>` : empty('Снимков пока нет. С 28 недель — объёмное 3D, лицо по выпавшим генам.')}`;
+    } else {
+        const f = (key, label, rows = 2, ph = '') => field(label, `<textarea rows="${rows}" data-kf="zdoc:${key}" data-id="${esc(id)}" placeholder="${esc(ph)}">${esc(Array.isArray(d[key]) ? d[key].join('\n') : d[key] || '')}</textarea>`);
+        body = `<div class="kl-actions">${btn('zFill', busy(`zfill:${id}`) ? `${spin} Читаю чат…` : `${ic('sparkles')} Заполнить по чату`, attr({ id }), 'primary')}</div>
+        ${field('Имя', `<input data-kf="zdoc:name" data-id="${esc(id)}" value="${esc(d.name)}">`)}
+        ${field('Роль', `<select data-kf="zdoc:zrole" data-id="${esc(id)}">${Object.entries(C.Z_ROLES).map(([k, l]) => `<option value="${k}" ${k === d.zrole ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`)}
+        ${f('notes', 'Заметки автора', 3, 'для «Заполнить по чату» — главнее всего')}${f('title', 'Регалии')}${f('place', 'Где принимает', 1)}${f('age', 'Возраст', 1)}${f('look', 'Внешность')}
+        ${f('character', 'Характер', 3)}${f('speech', 'Как говорит', 3)}${f('phrases', 'Её фразы — по одной в строке', 3)}${f('manner', 'С пациентами')}${f('knows', 'Что знает')}${f('quirks', 'Привычки')}
+        <div class="kl-row end">${btn('delDoc', `${ic('trash')} Убрать врача`, attr({ id }), 'sm ghost danger')}</div>`;
+    }
+    return `<div class="kl-sheet">${sheetHead(esc(d.name))}
+    <div class="kl-docimg">${d.img ? `<img src="${esc(d.img)}" alt="" data-k="zoomImg" data-src="${esc(d.img)}">` : docAva(d, 'xl')}
+    <div class="kl-col"><b>${esc(C.Z_ROLES[d.zrole] || D.roleName(d.role))}</b>${d.place ? `<small class="kl-mute">${esc(d.place)}</small>` : ''}${d.who?.length ? `<small class="kl-mute">ведёт: ${d.who.map(n => esc(C.short(n))).join(', ')}</small>` : ''}
+    ${btn('zDraw', busy(`zdraw:${id}`) ? spin : `${ic('wand')} Портрет`, attr({ id }), 'sm')}</div></div>
+    <div class="kl-seg">${tabs.map(([k, l]) => `<button class="${tab === k ? 'on' : ''}" data-k="zTab" data-v="${k}">${l}</button>`).join('')}</div>
+    ${body}</div>`;
 }
 function suggSheet() {
     const list = ui.modal.list || [];
@@ -539,7 +635,7 @@ const HANDLERS = {
     zoomImg: (el) => modal('zoom', { src: el.dataset.src }),
 
     // приём
-    newVisit: (el) => startVisit(el.dataset.who || ui.who),
+    newVisit: (el) => startVisit(el.dataset.who || ui.who, { ...(el.dataset.doc ? { doc: el.dataset.doc, docLock: true } : {}), ...(el.dataset.vk ? { vk: el.dataset.vk } : {}) }),
     vmWho: (el) => { ui.modal.who = el.dataset.v; ui.modal.opts = null; const d = C.docFor(ui.modal.vk, el.dataset.v); if (d && !ui.modal.docLock) ui.modal.doc = d.id; paintModal(); },
     vmKind: (el) => { ui.modal.vk = el.dataset.v; ui.modal.opts = null; if (!ui.modal.docLock) { const d = C.docFor(el.dataset.v, ui.modal.who); if (d) ui.modal.doc = d.id; } paintModal(); },
     vmScene: (el) => { ui.modal.scene = el.dataset.v === '1'; paintModal(); },
@@ -605,6 +701,39 @@ const HANDLERS = {
         renderSoon();
     },
     liveStones: (el) => modal('live', { who: C.canon(el.dataset.who || ui.who) }),
+    zDrawUS: async (el) => {
+        const who = el.dataset.who || ui.modal?.who || ui.who;
+        await withBusy('zus', async () => {
+            const id = await C.zDrawUS(who);
+            C.toast('success', 'Снимок УЗИ — в карте; боты увидят именно его');
+            if (ui.modal?.kind === 'newScan') modal('scan', { id });
+            else if (ui.modal) { ui.modal.keep = true; paintModal(); }
+        });
+    },
+    zSee: async (el) => { await withBusy(`see:${el.dataset.id}`, async () => { await C.zSeeUS(el.dataset.id); C.toast('success', 'Боты посмотрели на снимок заново'); }); },
+    arturMed: () => { try { globalThis.Artur?.open?.('med'); } catch (e) { C.toast('info', 'Арт не открылся'); } },
+
+    // приём у врача Зёрнышка
+    zTab: (el) => { ui.modal.ztab = el.dataset.v; ui.modal.keep = false; paintModal(); },
+    zOn: (el) => { C.zSetOn(el.dataset.id, el.dataset.v); paintModal(); renderSoon(); },
+    zOpts: async (el) => { await withBusy(`zopts:${el.dataset.id}`, async () => { await C.zOptions(el.dataset.id); }); },
+    zPick: (el) => {
+        const scene = ui.modal?.scene ?? C.cfg().scene;
+        const notes = C.zPick(el.dataset.id, el.dataset.v, scene);
+        zAfter(el.dataset.id, scene, notes);
+    },
+    zCustom: (el) => {
+        const t = String(ui.modal?.zcustom || '').trim();
+        if (!t) { C.toast('info', 'Напиши, что будет'); return; }
+        const scene = ui.modal?.scene ?? C.cfg().scene;
+        const notes = C.zCustom(el.dataset.id, t, scene);
+        ui.modal.zcustom = '';
+        zAfter(el.dataset.id, scene, notes);
+    },
+    zUnpick: () => { C.zUnpick(); paintModal(); renderSoon(); },
+    zDone: (el) => { const notes = C.zDone(el.dataset.id); zAfter(el.dataset.id, false, notes); },
+    zFill: async (el) => { await withBusy(`zfill:${el.dataset.id}`, async () => { await C.zFillDoc(el.dataset.id); if (ui.modal) ui.modal.keep = false; C.toast('success', 'Досье готово — проверь'); }); },
+    zDraw: async (el) => { await withBusy(`zdraw:${el.dataset.id}`, async () => { await C.zDrawDoc(el.dataset.id); }); },
     saveLive: (el) => { const s = C.addScan({ who: el.dataset.who, kind: 'stones', area: 'body', text: `Энергия ${C.stones(el.dataset.who)?.lvl ?? '—'} — ${C.stones(el.dataset.who)?.word || ''}` }); modal('scan', { id: s.id }); renderSoon(); },
 
     // формы медкарты
@@ -662,6 +791,19 @@ const HANDLERS = {
     formDel: (el) => { if (!confirmIn(el)) return; const m = ui.modal; if (m.del?.() !== false) closeModal(); },
 };
 function closeModalQuiet() { ui.modal = null; paintModal(); }
+/** После исхода у врача Зёрнышка: тихо — в карту (показать запись), в сцену — ждёт ответа модели. */
+function zAfter(id, scene, notes = []) {
+    if (scene) C.toast('success', 'Исход уйдёт модели на приёме — Зёрнышко запишет его, когда врач прозвучит в посте');
+    else C.toast('success', esc(['В карте', ...notes].join(' · ')));
+    if (!scene) {
+        const last = C.visits().filter(v => v.doc === id).pop();
+        if (last) { modal('visitView', { id: last.id }); renderSoon(); return; }
+    }
+    if (ui.modal) ui.modal.keep = true;
+    paintModal();
+    renderSoon();
+}
+export function openDoc(id) { open('docs'); if (C.docById(id)) modal('doc', { id }); }
 /** Второй тап подтверждает удаление (на айфоне нет нормального confirm поверх dialog). */
 function confirmIn(el) {
     if (el.dataset.sure === '1') return true;
@@ -707,6 +849,7 @@ export function onChange(e) {
         if (x) { x[key] = v; C.touch(); }
         return;
     }
+    if (ent === 'zdoc') { C.zDocSet(id, key, v); if (key === 'name' || key === 'zrole') renderSoon(); return; }
     if (ent === 'doc') {
         const d = C.M().docs.find(x => x.id === id);
         if (!d) return;
@@ -733,10 +876,20 @@ export function onInput(e) {
     const [ent, key] = fk.split(':');
     if (ent === 'vm' && ui.modal?.kind === 'visit' && ['reason', 'wish', 'custom'].includes(key)) ui.modal[key] = el.value;
     if (ent === 'ns' && ui.modal?.kind === 'newScan' && ['text', 'imp'].includes(key)) ui.modal[key] = el.value;
+    if (ent === 'zv' && key === 'custom' && ui.modal) ui.modal.zcustom = el.value;
 }
 async function upload(el) {
     const file = el.files?.[0];
     if (!file) return;
+    if (el.dataset.kup === 'zus') {
+        await withBusy('zus', async () => {
+            if (!C.A?.uploadImage || !C.A?.fileToJpeg) throw new Error('Загрузка картинок — через Life, а его нет');
+            const path = await C.A.uploadImage(await C.A.fileToJpeg(file, 1400), 'zr_us');
+            C.zAddUS(el.dataset.id, path);
+            C.toast('success', 'Снимок — в карте; боты посмотрят на него');
+        });
+        return;
+    }
     const d = C.M().docs.find(x => x.id === el.dataset.id);
     if (!d) return;
     await withBusy(`draw:${d.id}`, async () => {
