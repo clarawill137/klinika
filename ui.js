@@ -4,6 +4,7 @@
 import * as C from './core.js';
 import * as D from './data.js';
 import * as S from './scans.js';
+import * as H from './story.js';
 
 const esc = C.esc;
 const ui = { tab: 'today', who: '', modal: null, busy: new Set(), sw: '', sk: '', scroll: {}, pastMeds: false };
@@ -32,6 +33,8 @@ const P = {
     upload: '<path d="M12 15V4M7 9l5-5 5 5M4 20h16"/>', arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>', alert: '<path d="M12 3 2 20h20Z"/><path d="M12 10v4M12 17v.5"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', zoom: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4M11 8v6M8 11h6"/>', info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>',
     refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>', send: '<path d="M4 12 20 4l-6 16-3-7Z"/>', home: '<path d="M3 11 12 4l9 7M5 10v10h14V10"/>',
+    book: '<path d="M5 4h9a4 4 0 0 1 4 4v12H9a4 4 0 0 1-4-4Z"/><path d="M5 16a4 4 0 0 1 4-4h9"/>', undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
+    pause: '<path d="M8 5v14M16 5v14"/>', box: '<rect x="4" y="4" width="16" height="16" rx="3"/>',
 };
 export function ic(n, cls = '') { return `<svg class="kl-i${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n] || P.cross}</svg>`; }
 const LOGO = '<svg class="kl-logo" viewBox="0 0 40 40" aria-hidden="true"><rect x="3" y="3" width="34" height="34" rx="9" fill="none"/><path class="kl-logo-p" d="M7 21h7l3-7 5 14 3-7h8" fill="none"/></svg>';
@@ -61,6 +64,16 @@ const inp = (ent, id, key, val, ph = '', type = 'text', extra = '') => `<input t
 const area = (ent, id, key, val, ph = '', rows = 3) => `<textarea rows="${rows}" data-kf="${ent}:${key}" data-id="${esc(id)}" placeholder="${esc(ph)}">${esc(val ?? '')}</textarea>`;
 function sel(ent, id, key, val, list) { return `<select data-kf="${ent}:${key}" data-id="${esc(id)}">${list.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(val ?? '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`; }
 const toneCls = (t) => ({ calm: 'ok', watch: 'warn', alarm: 'bad' })[t] || '';
+/** Откуда запись: пост (Летописец), история (прочитано «По истории»), логика, Life. */
+function srcChip(x) {
+    if (!x) return '';
+    const at = x.mes != null && x.mes !== '' ? ` #${x.mes}` : '';
+    if (x.src === 'post') return chip(`пост${at}`);
+    if (x.src === 'story') return chip(`история${at}`, 'hist');
+    if (x.src === 'logic') return chip('логика', 'logic');
+    if (x.src === 'life') return chip(`Life${at}`);
+    return '';
+}
 const toneWord = (t) => ({ calm: 'спокойно', watch: 'последить', alarm: 'тревожно' })[t] || '';
 const PAPER = ['ssr', 'none', 'mit', 'mad', 'run'];
 /** Как рисовать снимок: сохранённый — по тому дню (эпоха, протезы, трещины, Камни, срок), черновик — по сейчас. */
@@ -161,9 +174,9 @@ function todayHtml() {
     ${visitFeed(C.visits().slice(-8).reverse())}`;
 }
 function planCard(p) {
-    const d = C.docById(p.doc);
-    return `<div class="kl-card plan ${p.st}">${docAva(d, 'sm')}<div class="kl-card-b"><div class="kl-card-h"><b>${p.time ? `${esc(p.time)} · ` : ''}${esc(C.short(p.who))}</b>${p.st === 'done' ? chip('проведён', 'ok') : p.st === 'miss' ? chip('пропущен', 'bad') : ''}</div>
-    <div class="kl-card-s">${esc(D.visitById(p.kind).name)}${d ? ` · ${esc(d.name)}` : ''}${p.note ? ` · ${esc(p.note)}` : ''}</div></div>
+    const d = C.docById(p.doc) || (p.docName ? { name: p.docName } : null);
+    return `<div class="kl-card plan ${p.st}">${docAva(d, 'sm')}<div class="kl-card-b"><div class="kl-card-h"><b>${p.time ? `${esc(p.time)} · ` : ''}${esc(C.short(p.who))}</b>${p.st === 'done' ? chip('проведён', 'ok') : p.st === 'miss' ? chip('пропущен', 'bad') : ''}${srcChip(p)}</div>
+    <div class="kl-card-s">${esc(D.visitById(p.kind).name)}${d ? ` · ${esc(d.name)}` : ''}${p.note ? ` · ${esc(p.note)}` : ''}</div>${p.why ? `<div class="kl-card-s kl-why">${esc(p.why)}</div>` : ''}</div>
     <div class="kl-card-a">${p.st === 'plan' ? btn('planGo', 'Начать', attr({ id: p.id }), 'sm primary') : ''}${btn('formPlan', ic('pencil'), attr({ id: p.id }), 'ico sm ghost')}</div></div>`;
 }
 function patSummary(who) {
@@ -173,8 +186,10 @@ function patSummary(who) {
     const st = C.stones(who);
     const lim = C.limits(who);
     const ms = C.activeMeds(who);
+    const cs = C.conds(who).filter(x => x.st === 'active' || x.st === 'chronic').slice(0, 4);
     return `<div class="kl-sum">${ava(who, 'lg')}<div class="kl-sum-b"><b>${esc(C.canon(who))}</b>
-    <div class="kl-flags">${fl.map(x => chip(x.t, x.cls)).join('') || '<span class="kl-mute">Медкарта пустая — можно начать с приёма или веса.</span>'}</div></div></div>
+    <div class="kl-flags">${fl.map(x => chip(x.t, x.cls)).join('') || '<span class="kl-mute">Медкарта пустая — начни с приёма, веса или «По истории и логике» в медкарте.</span>'}</div>
+    ${cs.length ? `<div class="kl-flags">${cs.map(x => chip(x.t, x.st === 'active' ? 'warn' : 'on')).join('')}</div>` : ''}</div></div>
     ${st ? stonesGauge(st, who) : ''}
     ${pg ? pregRow(who, pg) : ''}
     ${lim.length ? `<div class="kl-lims">${lim.map(l => `<div>${ic('alert')}<span>${esc(l.t)}${l.until ? ` <small>до ${esc(C.fmtDay(l.until))}</small>` : ''}${l.by ? ` <small>· ${esc(C.short(l.by))}</small>` : ''}</span></div>`).join('')}</div>` : ''}
@@ -208,7 +223,7 @@ function visitFeed(list) {
     return `<div class="kl-list">${list.map(v => {
         const d = C.docById(v.doc) || (v.docName ? { name: v.docName } : null);
         return `<button class="kl-card visit ${toneCls(v.tone)}" data-k="visitView" data-id="${esc(v.id)}">${docAva(d, 'sm')}<div class="kl-card-b">
-        <div class="kl-card-h"><b>${esc(C.short(v.who))}${v.docName ? ` · ${esc(d?.z ? C.docShort(d) : C.short(v.docName))}` : ''}</b>${v.tone ? chip(toneWord(v.tone), toneCls(v.tone)) : v.src === 'post' ? chip('из поста') : v.stamp ? chip(v.stamp, 'on') : ''}<span class="kl-date">${esc(C.fmtDay(v.day))}</span></div>
+        <div class="kl-card-h"><b>${esc(C.short(v.who))}${v.docName ? ` · ${esc(d?.z ? C.docShort(d) : C.short(v.docName))}` : ''}</b>${v.tone ? chip(toneWord(v.tone), toneCls(v.tone)) : v.src === 'post' ? chip('из поста') : v.src === 'story' ? chip('из истории', 'hist') : v.stamp ? chip(v.stamp, 'on') : ''}<span class="kl-date">${esc(C.fmtDay(v.day))}</span></div>
         ${v.label && v.label !== 'Своё' ? `<div class="kl-card-t">${esc(v.label)}</div>` : ''}<div class="kl-card-s">${esc(C.cut(v.found || v.said || '', 150))}</div></div></button>`;
     }).join('')}</div>`;
 }
@@ -245,9 +260,13 @@ function patHtml() {
     };
     return `${whoChips(who)}
     <div class="kl-sum">${ava(who, 'lg')}<div class="kl-sum-b"><b>${esc(k)}</b><div class="kl-flags">${C.flags(who).map(x => chip(x.t, x.cls)).join('')}</div></div></div>
-    <div class="kl-actions">${btn('newVisit', `${ic('stetho')} Приём`, attr({ who }), 'primary')}${btn('newScan', `${ic('scan')} Снимок`, attr({ who }))}${btn('fillPat', busy(`fill:${k}`) ? spin : `${ic('sparkles')} Заполнить по лорбукам`, attr({ who }))}</div>
+    <div class="kl-actions">${btn('newVisit', `${ic('stetho')} Приём`, attr({ who }), 'primary')}${btn('newScan', `${ic('scan')} Снимок`, attr({ who }))}${btn('fillOpen', H.run.on && C.same(H.run.who, k) ? `${spin} Заполняю…` : `${ic('sparkles')} По истории и логике`, attr({ who: k }))}</div>
+    ${fillBand()}
 
-    ${sec('Профиль')}
+    ${sec('Диагнозы и состояния', btn('formCond', ic('plus'), attr({ who: k }), 'ico sm'))}
+    ${condsHtml(who)}
+
+    ${sec('Профиль', btn('fillPat', busy(`fill:${k}`) ? spin : `${ic('sparkles')} из лорбуков`, attr({ who: k }), 'sm ghost'))}
     <div class="kl-grid2">
         ${field('Пол', sel('pat', k, 'sex', p.sex, [['', '—'], ['F', 'женский'], ['M', 'мужской']]))}
         ${field('Возраст', inp('pat', k, 'age', p.age, 'лет'))}
@@ -257,30 +276,32 @@ function patHtml() {
     ${field('Особенности тела', area('pat', k, 'special', p.special, 'сыворотка, мутация, хроническое…', 2))}
     ${field('Свои нормы', area('pat', k, 'norms', p.norms, 'пульс в покое 50–60 — норма; давление 100/60 для неё обычное', 2), 'эти числа не красятся')}
     ${field('Аллергия', inp('pat', k, 'allergy', p.allergy, 'нет'))}
+    ${(() => { const al = C.allergyText(who); return al && al !== p.allergy ? `<div class="kl-hint">${ic('alert')} Из постов: ${esc(p.allergy ? al.replace(p.allergy, '').replace(/^;\s*/, '') : al)}</div>` : ''; })()}
     ${field('Заметки', area('pat', k, 'notes', p.notes, '', 2))}
 
     ${sec('Вес', btn('formWeight', ic('plus'), attr({ who }), 'ico sm'))}
     ${ws.length ? `<div class="kl-big">${esc(String(lw.kg))}<small> кг${b ? ` · ИМТ ${b}` : ''}</small></div>
     ${band ? `<div class="kl-band ${band.status}">${ic('baby')}<span>Набор ${band.gain >= 0 ? '+' : ''}${band.gain} кг от ${band.est ? '≈' : ''}${band.base}; по сроку норма +${band.lo}…+${band.hi} кг (${p.height ? `ИМТ до беременности ${band.bmi} — ${esc(band.cat)}` : 'рост не вписан — считаю как при нормальном ИМТ'}) — ${band.status === 'ok' ? 'в коридоре' : band.status === 'low' ? 'ниже коридора' : 'выше коридора'}${band.est ? '<br><small>Вес до беременности прикинут по первому взвешиванию — впиши настоящий ниже.</small>' : ''}</span></div>` : ''}
     <div class="kl-chartbox">${S.weightChart({ pts: ws, band: band ? { ...band, rate: band.rate } : null, today: C.storyDay() })}</div>
-    <div class="kl-recs">${ws.slice(-5).reverse().map(x => `<div><span>${esc(C.fmtDay(x.day, true))}</span><b>${esc(String(x.kg))} кг</b>${x.src === 'post' ? chip('пост') : btn('delRec', ic('x'), attr({ who: k, list: 'weights', id: x.id }), 'ico sm ghost')}</div>`).join('')}</div>
+    <div class="kl-recs">${ws.slice(-5).reverse().map(x => `<div><span>${esc(C.fmtDay(x.day, true))}</span><b>${esc(String(x.kg))} кг</b>${x.src === 'post' ? srcChip(x) : `${srcChip(x)}${btn('delRec', ic('x'), attr({ who: k, list: 'weights', id: x.id }), 'ico sm ghost')}`}</div>`).join('')}</div>
     ${!p.height ? '<div class="kl-hint">Впиши рост — посчитаю ИМТ и коридор набора в беременность.</div>' : ''}` : empty('Взвешиваний нет. «+» — записать, или вес придёт из постов и приёмов.')}
     ${pg && ws.length ? field('Вес до беременности', inp('pat', k, 'baseKg', p.baseKg || '', `${ws[0].kg} — первая запись`, 'text', 'inputmode="decimal" autocomplete="off"'), 'для коридора набора') : ''}
 
     ${sec('Показатели', btn('formVitals', ic('plus'), attr({ who }), 'ico sm'))}
     <div class="kl-vits">${['sys', 'hr', 'spo2', 't', 'rr'].map(vcell).join('')}</div>
-    ${vh.length ? `<div class="kl-recs">${vh.map(x => `<div><span>${esc(C.fmtDay(x.day))}${x.time ? ` ${esc(x.time)}` : ''}</span><b>${[x.sys ? `${x.sys}/${x.dia}` : '', x.hr ? `♥ ${x.hr}` : '', x.spo2 ? `${x.spo2}%` : '', x.t ? `${x.t}°` : ''].filter(Boolean).join(' · ')}</b>${x.src === 'post' ? chip('пост') : btn('delRec', ic('x'), attr({ who: k, list: 'vitals', id: x.id }), 'ico sm ghost')}</div>`).join('')}</div>` : ''}
+    ${vh.length ? `<div class="kl-recs">${vh.map(x => `<div><span>${esc(C.fmtDay(x.day))}${x.time ? ` ${esc(x.time)}` : ''}</span><b>${[x.sys ? `${x.sys}/${x.dia}` : '', x.hr ? `♥ ${x.hr}` : '', x.spo2 ? `${x.spo2}%` : '', x.t ? `${x.t}°` : ''].filter(Boolean).join(' · ')}</b>${x.src === 'post' ? srcChip(x) : `${srcChip(x)}${btn('delRec', ic('x'), attr({ who: k, list: 'vitals', id: x.id }), 'ico sm ghost')}`}</div>`).join('')}</div>` : ''}
 
     ${sec('Анализы', btn('formLabs', ic('plus'), attr({ who }), 'ico sm'))}
     ${labs.length ? `<div class="kl-labs">${labs.map(l => `<div class="${l.flag ? 'warn' : ''}"><span>${esc(l.name)}<small>${esc(C.fmtDay(l.day))}</small></span><b>${esc(String(l.v))}${l.flag ? (l.flag === 'low' ? ' ↓' : ' ↑') : ''}</b><em>${esc(l.u)}${l.ref ? ` · ${l.ref[0]}–${l.ref[1]}` : ''}</em></div>`).join('')}</div>` : empty('Анализов нет.')}
 
     ${sec('Лекарства', btn('formMed', ic('plus'), attr({ who }), 'ico sm'))}
-    ${act.length ? `<div class="kl-list">${act.map(m => `<div class="kl-card med">${ic('pill')}<div class="kl-card-b"><div class="kl-card-h"><b>${esc(m.name)}</b>${m.dose ? `<span>${esc(m.dose)}</span>` : ''}</div><div class="kl-card-s">${[m.why, m.by ? `назначил(а) ${C.short(m.by)}` : '', m.from ? `с ${C.fmtDay(m.from)}` : '', m.to ? `до ${C.fmtDay(m.to)}` : ''].filter(Boolean).map(esc).join(' · ')}</div></div>${btn('stopMed', 'Отменить', attr({ who: k, id: m.id }), 'sm ghost')}</div>`).join('')}</div>` : empty('Ничего не принимает.')}
+    ${act.length ? `<div class="kl-list">${act.map(m => `<div class="kl-card med">${ic('pill')}<div class="kl-card-b"><div class="kl-card-h"><b>${esc(m.name)}</b>${m.dose ? `<span>${esc(m.dose)}</span>` : ''}${srcChip(m)}</div><div class="kl-card-s">${[m.why, m.by ? `назначил(а) ${C.short(m.by)}` : '', m.from ? `с ${C.fmtDay(m.from)}` : '', m.to ? `до ${C.fmtDay(m.to)}` : ''].filter(Boolean).map(esc).join(' · ')}</div></div>${btn('stopMed', 'Отменить', attr({ who: k, id: m.id }), 'sm ghost')}</div>`).join('')}</div>` : empty('Ничего не принимает.')}
     ${past.length ? `<button class="kl-more" data-k="pastMeds">${ui.pastMeds ? 'Скрыть' : `Отменённые и прошлые · ${past.length}`}</button>${ui.pastMeds ? `<div class="kl-recs">${past.map(m => `<div><span>${esc(m.name)}${m.dose ? ` ${esc(m.dose)}` : ''}</span><b>${esc([m.from ? C.fmtDay(m.from) : '', m.to ? C.fmtDay(m.to) : ''].filter(Boolean).join(' – '))}</b>${m.src === 'post' ? chip('пост') : btn('delRec', ic('x'), attr({ who: k, list: 'meds', id: m.id }), 'ico sm ghost')}</div>`).join('')}</div>` : ''}` : ''}
 
     ${C.limits(who).length ? `${sec('Запреты врачей')}<div class="kl-lims">${C.limits(who).map(l => `<div>${ic('alert')}<span>${esc(l.t)}${l.until ? ` <small>до ${esc(C.fmtDay(l.until))}</small>` : ''}</span></div>`).join('')}</div>` : ''}
 
-    ${wn.length ? `${sec('Раны и травмы', '<small>из Life</small>')}<div class="kl-recs">${wn.map(w => `<div><span>${esc(w.t)}${w.part && !C.norm(w.t).includes(C.norm(w.part)) ? ` <small>${esc(w.part)}</small>` : ''}</span><b>${w.old ? 'старое' : esc(['', 'лёгкая', 'средняя', 'тяжёлая', 'критическая'][w.sev] || '')}</b></div>`).join('')}</div>` : ''}
+    ${sec('Анамнез', btn('formHist', ic('plus'), attr({ who: k }), 'ico sm'))}
+    ${anamHtml(who, wn)}
 
     ${sec('Импланты и протезы', btn('addImplant', ic('plus'), attr({ who: k }), 'ico sm'))}
     ${p.implants.length ? p.implants.map(x => `<div class="kl-imp"><div class="kl-grid2">${field('Что', inp('imp', x.id, 'note', x.note, 'бионический протез левой руки'))}${field('Где', sel('imp', x.id, 'part', x.part, [['arm_l', 'левая рука'], ['arm_r', 'правая рука'], ['leg_l', 'левая нога'], ['leg_r', 'правая нога'], ['chest', 'грудь'], ['skull', 'голова'], ['spine', 'позвоночник'], ['other', 'другое']]))}</div>
@@ -298,9 +319,45 @@ function patHtml() {
     ${sec('Приёмы')}
     ${visitFeed(vis)}
 
+    ${fillFoot()}
     <div class="kl-row end" style="margin-top:18px">${btn('hidePat', `${ic('eyeoff')} Убрать из Клиники`, attr({ who: k }), 'sm ghost')}</div>
     ${hid.length ? `<div class="kl-hint">Убраны: ${hid.map(n => `<button class="kl-chip" data-k="unhide" data-v="${esc(n)}">${esc(C.short(n))} ${ic('refresh')}</button>`).join(' ')}</div>` : ''}`;
 }
+const COND_CLS = { active: 'warn', chronic: 'on', risk: '', habit: '', past: '' };
+function condsHtml(who) {
+    const list = C.conds(who);
+    if (!list.length) return empty('Пусто. Диагнозы приходят из постов (Летописец), из «По истории и логике» или кнопкой «+».');
+    const now = list.filter(x => x.st !== 'past');
+    const past = list.filter(x => x.st === 'past');
+    const row = (x) => `<div class="kl-cond ${x.st}"><span><b>${esc(x.t)}</b>${x.why ? `<small>${esc(x.why)}</small>` : ''}</span><em>${chip(C.COND_ST[x.st] || x.st, COND_CLS[x.st] || '')}${srcChip(x)}${x.day ? `<i>${esc(C.fmtDay(x.day, true))}${x.to ? ` – ${esc(C.fmtDay(x.to, true))}` : ''}</i>` : ''}</em>${x.src !== 'post' ? btn('condMenu', ic('pencil'), attr({ who: C.canon(who), id: x.id }), 'ico sm ghost') : ''}</div>`;
+    return `<div class="kl-conds">${now.map(row).join('')}</div>${past.length ? `<button class="kl-more" data-k="pastConds">${ui.pastConds ? 'Скрыть прошлое' : `Было и прошло · ${past.length}`}</button>${ui.pastConds ? `<div class="kl-conds dim">${past.map(row).join('')}</div>` : ''}` : ''}`;
+}
+const HIST_ICO = { inj: 'bone', scar: 'pencil', proc: 'cross', ill: 'drop', lab: 'flask', note: 'notes' };
+const CARE_W = ['без помощи', 'первая помощь', 'врач', 'операция'];
+function anamHtml(who, wn = C.wounds(who)) {
+    const list = C.history(who);
+    if (!list.length) return empty('Анамнез пуст: травмы придут из Life, процедуры и анализы — из постов, прошлое — из «По истории и логике».');
+    const shown = ui.allHist ? list : list.slice(0, 12);
+    const now = new Set(wn.filter(w => !w.old).map(w => C.norm(w.t)));
+    return `<div class="kl-anam">${shown.map(x => {
+        const live = x.src === 'life' && x.kind === 'inj' && !x.healed;
+        const tags = [x.kind === 'inj' && x.care ? CARE_W[x.care] : '', x.by ? C.short(x.by) : '', x.healed ? `зажило${x.healedDay ? ` ${C.fmtDay(x.healedDay)}` : ''}` : ''].filter(Boolean);
+        return `<div class="kl-an ${live ? 'live' : ''}">${ic(HIST_ICO[x.kind] || 'notes')}<span><b>${esc(x.t)}${x.part && !C.norm(x.t).includes(C.norm(x.part)) ? ` <small>${esc(x.part)}</small>` : ''}</b>${tags.length ? `<small>${tags.map(esc).join(' · ')}</small>` : ''}</span><em>${live && now.has(C.norm(x.t)) ? chip(['', 'лёгкая', 'средняя', 'тяжёлая', 'критическая'][x.sev] || 'сейчас', x.sev >= 3 ? 'bad' : 'warn') : ''}${srcChip(x)}${x.day ? `<i>${esc(C.fmtDay(x.day, true))}</i>` : ''}</em>${!['post', 'life'].includes(x.src) ? btn('delRec', ic('x'), attr({ who: C.canon(who), list: 'hist', id: x.id }), 'ico sm ghost') : ''}</div>`;
+    }).join('')}</div>${list.length > 12 ? `<button class="kl-more" data-k="allHist">${ui.allHist ? 'Свернуть' : `Весь анамнез · ${list.length}`}</button>` : ''}`;
+}
+/** Непросмотренный лист заполнения или идёт заполнение — полоса сверху. */
+function fillBand() {
+    if (H.run.on) return `<button class="kl-band warn kl-fillband" data-k="fillShow">${spin}<span><b>Заполняю по истории и логике</b> ${esc(H.run.what || '')} · ${H.run.step}/${H.run.of}</span></button>`;
+    const d = H.draft();
+    if (d?.items?.length) return `<button class="kl-band ok kl-fillband" data-k="fillShow">${ic('sparkles')}<span><b>Лист заполнения ждёт</b> ${d.items.length} ${plural(d.items.length, 'запись', 'записи', 'записей')} на проверку${d.who ? ` · ${esc(C.short(d.who))}` : ''} — открыть</span></button>`;
+    return '';
+}
+function fillFoot() {
+    const f = H.lastFill();
+    return `<div class="kl-fillfoot">${btn('fillOpen', `${ic('book')} Вся Клиника по истории и логике`, attr({ who: '' }), 'sm')}
+    ${f ? `<div class="kl-hint">${ic('check')} ${esc(C.fmtDay(f.day, true) || 'Заполнено')}${f.who ? ` · ${esc(C.short(f.who))}` : ''}: ${f.n} ${plural(f.n, 'запись', 'записи', 'записей')} ${btn('fillUndo', `${ic('undo')} Отменить`, attr({ id: f.id }), 'sm ghost')}</div>` : ''}</div>`;
+}
+
 function scanThumb(s) {
     return `<button class="kl-thumb" data-k="scanView" data-id="${esc(s.id)}"><span class="kl-thumb-i">${scanSvg(s, true)}</span><span>${esc(scanTitle(s))}<small>${esc(C.short(s.who))} · ${esc(C.fmtDay(s.day))}</small></span></button>`;
 }
@@ -322,12 +379,13 @@ function scansHtml() {
 function docsHtml() {
     const own = C.docs();
     const z = C.hasZ() ? C.zDocs().map(C.zAsDoc) : [];
+    const pd = C.postDocs().filter(d => d.era === C.era().id);
     const other = C.docs(true).filter(d => d.era !== C.era().id);
-    const card = (d) => `<button class="kl-card doc" data-k="docView" data-id="${esc(d.id)}">${docAva(d, 'md')}<div class="kl-card-b"><div class="kl-card-h"><b>${esc(d.name)}</b>${d.z && C.zVisit(d.id)?.here ? chip('приём идёт', 'on') : ''}</div>
-        <div class="kl-card-s">${esc(d.z ? C.Z_ROLES[d.zrole] || D.roleName(d.role) : d.title || D.roleName(d.role))}${d.place ? ` · ${esc(d.place)}` : ''}</div>${d.who?.length ? `<div class="kl-card-s">ведёт: ${d.who.map(n => esc(C.short(n))).join(', ')}</div>` : ''}</div></button>`;
+    const card = (d) => `<button class="kl-card doc" data-k="docView" data-id="${esc(d.id)}">${docAva(d, 'md')}<div class="kl-card-b"><div class="kl-card-h"><b>${esc(d.name)}</b>${d.z && C.zVisit(d.id)?.here ? chip('приём идёт', 'on') : ''}${d.post ? chip(`из поста #${d.mes}`) : srcChip(d)}</div>
+        <div class="kl-card-s">${esc(d.z ? C.Z_ROLES[d.zrole] || D.roleName(d.role) : d.title || D.roleName(d.role))}${d.place ? ` · ${esc(d.place)}` : ''}</div>${d.who?.length ? `<div class="kl-card-s">ведёт: ${d.who.map(n => esc(C.short(n))).join(', ')}</div>` : ''}${d.why ? `<div class="kl-card-s kl-why">${esc(d.why)}</div>` : ''}</div></button>`;
     return `<div class="kl-actions">${btn('newDoc', `${ic('plus')} Врач`, '', 'primary')}${btn('suggDocs', busy('sugg') ? spin : `${ic('sparkles')} Найти в лорбуках`)}</div>
-    ${sec(esc(C.era().title), String(own.length + z.length))}
-    ${own.length || z.length ? `<div class="kl-list">${own.map(card).join('')}${z.map(card).join('')}</div>` : empty('Врачей этой эпохи нет. «Найти в лорбуках» — предложу из её истории.')}
+    ${sec(esc(C.era().title), String(own.length + z.length + pd.length))}
+    ${own.length || z.length || pd.length ? `<div class="kl-list">${own.map(card).join('')}${z.map(card).join('')}${pd.map(card).join('')}</div>` : empty('Врачей этой эпохи нет. «Найти в лорбуках» — предложу из её истории; врачи из постов появятся сами.')}
     ${other.length ? `${sec('Других эпох', String(other.length))}<div class="kl-list dim">${other.map(card).join('')}</div>` : ''}`;
 }
 
@@ -356,7 +414,7 @@ function paintModal() {
     const top = box.querySelector('.kl-sheet')?.scrollTop || 0;
     let html = '';
     try {
-        html = { visit: visitSheet, visitView: visitViewSheet, scan: scanSheet, newScan: newScanSheet, doc: docSheet, sugg: suggSheet, form: formSheet, labs: labsSheet, live: liveSheet, zoom: zoomSheet }[ui.modal.kind]?.() || '';
+        html = { visit: visitSheet, visitView: visitViewSheet, scan: scanSheet, newScan: newScanSheet, doc: docSheet, sugg: suggSheet, form: formSheet, labs: labsSheet, live: liveSheet, zoom: zoomSheet, fill: fillSheet }[ui.modal.kind]?.() || '';
     } catch (err) { console.error('[Клиника] лист', err); html = `<div class="kl-sheet">${empty(`Лист упал: ${esc(err?.message || err)}`)}${btn('closeModal', 'Закрыть')}</div>`; }
     box.innerHTML = `<div class="kl-shade" data-k="closeModal"></div>${html}`;
     box.classList.add('on');
@@ -456,7 +514,7 @@ function visitViewSheet() {
     const labs = C.P(v.who).labs.filter(l => l.visit === v.id);
     const vit = C.P(v.who).vitals.find(x => x.visit === v.id);
     return `<div class="kl-sheet">${sheetHead(`${esc(C.short(v.who))} · ${esc(C.fmtDay(v.day, true))}`)}
-    <div class="kl-sum">${docAva(d, 'lg')}<div class="kl-sum-b"><b>${esc(d?.name || 'врач')}</b><div class="kl-flags">${chip(D.visitById(v.kind).name)}${v.stamp ? chip(v.stamp, 'on') : ''}${v.tone ? chip(toneWord(v.tone), toneCls(v.tone)) : ''}${v.scene ? chip('в сцене', 'on') : ''}${v.src === 'post' ? chip('из поста') : ''}${v.z ? chip(Z_SRC[v.zsrc] || 'запись') : ''}</div></div></div>
+    <div class="kl-sum">${docAva(d, 'lg')}<div class="kl-sum-b"><b>${esc(d?.name || 'врач')}</b><div class="kl-flags">${chip(D.visitById(v.kind).name)}${v.stamp ? chip(v.stamp, 'on') : ''}${v.tone ? chip(toneWord(v.tone), toneCls(v.tone)) : ''}${v.scene ? chip('в сцене', 'on') : ''}${v.src === 'post' ? chip('из поста') : ''}${v.src === 'story' ? chip(`из истории${v.mes != null ? ` · пост #${v.mes}` : ''}`, 'hist') : ''}${v.z ? chip(Z_SRC[v.zsrc] || 'запись') : ''}</div></div></div>
     ${v.z && v.label && v.label !== 'Приём' ? `<div class="kl-card-t">${esc(v.label)}</div>` : ''}
     ${v.reason ? `<div class="kl-hint">Причина: ${esc(v.reason)}</div>` : ''}
     ${v.found ? `${sec('Что нашли')}<p class="kl-p">${esc(v.found)}</p>` : ''}
@@ -530,6 +588,8 @@ function docSheet() {
     if (d.z) return zDocSheet(d);
     const id = d.id;
     return `<div class="kl-sheet">${sheetHead(esc(d.name))}
+    ${d.post ? `<div class="kl-band">${ic('info')}<span>Появился в посте #${esc(d.mes)} — уйдёт сам, если пост свайпнуть. Тронешь досье или проведёшь приём — останется насовсем.</span></div>` : ''}
+    ${d.why ? `<div class="kl-hint">${srcChip(d)} ${esc(d.why)}</div>` : ''}
     <div class="kl-docimg">${d.img ? `<img src="${esc(d.img)}" alt="" data-k="zoomImg" data-src="${esc(d.img)}">` : docAva(d, 'xl')}
     <div class="kl-col">${btn('docDraw', busy(`draw:${id}`) ? spin : `${ic('wand')} Нарисовать`, attr({ id }), 'sm')}<label class="kl-btn sm ghost">${ic('upload')} Фото<input type="file" accept="image/*" data-kup="doc" data-id="${esc(id)}" hidden></label></div></div>
     ${field('Имя', inp('doc', id, 'name', d.name))}
@@ -586,6 +646,76 @@ function suggSheet() {
     ${list.length ? `<div class="kl-list">${list.map((d, i) => `<div class="kl-card">${docAva(d, 'sm')}<div class="kl-card-b"><div class="kl-card-h"><b>${esc(d.name)}</b>${chip(D.roleName(d.role))}</div><div class="kl-card-s">${esc(d.title)}${d.place ? ` · ${esc(d.place)}` : ''}</div>${d.why ? `<div class="kl-card-s">${esc(d.why)}</div>` : ''}</div>${d.added ? chip('добавлен', 'ok') : btn('suggAdd', ic('plus'), attr({ i }), 'ico sm')}</div>`).join('')}</div>` : empty('Никого нового не нашлось.')}</div>`;
 }
 function zoomSheet() { return `<div class="kl-sheet wide">${sheetHead('')}<img class="kl-zoom" src="${esc(ui.modal.src)}" alt=""></div>`; }
+
+// ───────────── «По истории и логике»: старт, прогресс, лист проверки ─────────────
+
+function fillSheet() {
+    const m = ui.modal;
+    if (H.run.on) return fillRunSheet();
+    const d = H.draft();
+    if (m.stage === 'review' && d) return fillReviewSheet(d);
+    return fillStartSheet(m);
+}
+function fillStartSheet(m) {
+    const who = m.who || '';
+    const k = `${who}|${m.fresh ? 1 : 0}|${C.lastIndex()}|${C.M().histScan?.upTo ?? -1}`;
+    // большой чат читается секунду-две — считаю после того, как лист уже открылся
+    if (!m.est || m.est.k !== k) {
+        if (m.estFor !== k) {
+            m.estFor = k;
+            setTimeout(() => { if (ui.modal !== m) return; try { m.est = { k, ...H.plan({ who, fresh: !!m.fresh }) }; } catch (err) { console.warn('[Клиника] история', err); m.est = { k, list: [], posts: 0, chars: 0, packs: 0, upTo: -1, err: String(err?.message || err) }; } m.keep = true; paintModal(); }, 60);
+        }
+        return `<div class="kl-sheet">${sheetHead(who ? `По истории и логике · ${esc(C.short(who))}` : 'Вся Клиника по истории и логике')}<div class="kl-run"><b>${spin} Смотрю, сколько медицины в истории…</b><small>постов в чате: ${C.chat().length}</small></div></div>`;
+    }
+    const e = m.est;
+    const pats = C.patients();
+    if (!who && !m.people) m.people = [...pats];
+    const ppl = who ? [C.canon(who)] : m.people;
+    const reqs = (m.story ? e.packs : 0) + (m.logic ? ppl.length : 0);
+    let codex = false;
+    try { codex = !!C.A?.story?.ready?.(); } catch { /* */ }
+    return `<div class="kl-sheet">${sheetHead(who ? `По истории и логике · ${esc(C.short(who))}` : 'Вся Клиника по истории и логике')}
+    <div class="kl-hint"><b>История</b> — что было в чате: врачи, приёмы, травмы, лекарства, цифры, анализы. <b>Логика</b> — что из этого и из тела, прошлого и эпохи следует: хроническое, риски, что принимает, какие осмотры положены, кто ведёт. Придёт листом с галочками; запишется только выбранное — одной пачкой, её можно отменить.</div>
+    <div class="kl-seg">${[['story', `${ic('book')} История`], ['logic', `${ic('sparkles')} Логика`]].map(([key, l]) => `<button class="${m[key] ? 'on' : ''}" data-k="fiOpt" data-v="${key}">${l}</button>`).join('')}</div>
+    ${!who ? `${sec('Кого', `${ppl.length} из ${pats.length}`)}<div class="kl-chips wrap">${pats.map(n => `<button class="kl-chip who ${ppl.some(x => C.same(x, n)) ? 'on' : ''}" data-k="fiPpl" data-v="${esc(n)}">${ava(n, 'xs')}${esc(C.short(n))}</button>`).join('')}</div>` : ''}
+    ${m.story ? `${sec('История')}
+    <div class="kl-recs"><div><span>Медицина нашлась</span><b>${e.list.length} ${plural(e.list.length, 'пост', 'поста', 'постов')} из ${e.posts}</b></div><div><span>Объём</span><b>≈ ${Math.max(e.chars ? 1 : 0, Math.round(e.chars / 1000))} тыс. знаков</b></div><div><span>Запросов умной модели</span><b>${e.packs}</b></div></div>
+    ${!who && e.upTo >= 0 ? `<div class="kl-hint">${ic('check')} ${m.fresh ? 'Перечитаю всю историю с начала.' : `История прочитана до поста #${e.upTo} — сейчас только новое.`} ${btn('fiOpt', m.fresh ? 'Только новое' : 'Перечитать всё', attr({ v: 'fresh' }), 'sm ghost')}</div>` : ''}
+    ${who ? `<div class="kl-hint">Только посты, где есть ${esc(C.short(who))}, — с начала чата.</div>` : ''}
+    ${!e.list.length ? '<div class="kl-hint">Новой медицины в постах нет — читать нечего.</div>' : ''}` : ''}
+    ${m.logic ? `${sec('Логика')}<div class="kl-hint">${ppl.length} ${plural(ppl.length, 'запрос', 'запроса', 'запросов')} — по одному на человека${codex ? ', со сводом всей истории из Life' : '. Свода истории в Life нет (Мир → Свод) — логика опирается на медкарту, лорбуки, карточку и найденное в истории'}.</div>` : ''}
+    <div class="kl-actions">${btn('fiGo', `${ic('sparkles')} Поехали · ${reqs} ${plural(reqs, 'запрос', 'запроса', 'запросов')}`, reqs ? '' : 'disabled', 'primary wide')}</div>
+    <div class="kl-hint">Не уходи из Safari, пока читаю: свёрнутая вкладка обрывает запрос. Окно Клиники закрыть можно — лист дождётся.</div></div>`;
+}
+function fillRunSheet() {
+    const r = H.run;
+    const pct = r.of ? Math.round((100 * Math.max(0, r.step - 0.5)) / r.of) : 0;
+    return `<div class="kl-sheet">${sheetHead('По истории и логике')}
+    <div class="kl-run"><b>${esc(r.what || 'Работаю…')}</b><i class="kl-meter"><b style="width:${pct}%"></b></i><small>шаг ${r.step} из ${r.of}${r.stop ? ' · остановлюсь после этого шага' : ''}</small></div>
+    <div class="kl-actions">${btn('fiStop', `${ic('pause')} Остановить после этого шага`, r.stop ? 'disabled' : '', 'wide')}</div>
+    <div class="kl-hint">Не уходи из Safari, пока читаю. Окно Клиники можно закрыть — лист сохранится.</div></div>`;
+}
+function fillReviewSheet(d) {
+    const items = d.items;
+    const on = items.filter(x => x.on).length;
+    const st = items.filter(x => x.src === 'story').length;
+    const groups = new Map();
+    for (const x of items) { const g = x.type === 'doc' ? '__docs' : C.canon(x.who); if (!groups.has(g)) groups.set(g, []); groups.get(g).push(x); }
+    if (groups.has('__docs')) { const dl = groups.get('__docs'); groups.delete('__docs'); groups.set('__docs', dl); }
+    const row = (x) => `<button class="kl-fi ${x.on ? 'on' : ''} ${x.src}" data-k="fiTog" data-id="${esc(x.id)}"><i class="kl-fi-c">${x.on ? ic('check') : ''}</i><span><b>${esc(H.line(x))}</b>${x.why ? `<small>${esc(x.why)}</small>` : ''}</span><em>${x.src === 'logic' ? chip('логика', 'logic') : chip(x.mes != null ? `#${x.mes}` : 'история', 'hist')}</em></button>`;
+    const block = ([g, list]) => {
+        const types = H.TYPE_ORDER.filter(t => list.some(x => x.type === t));
+        const head = g === '__docs' ? `${ic('badge')}<b>Врачи</b>` : `${ava(g, 'xs')}<b>${esc(C.short(g))}</b>`;
+        return `<details class="kl-fg" open><summary>${head}<small>${list.filter(x => x.on).length} из ${list.length}</small></summary>${types.map(t => `<div class="kl-ft">${esc(H.TYPE_NAME[t])}</div>${list.filter(x => x.type === t).map(row).join('')}`).join('')}</details>`;
+    };
+    return `<div class="kl-sheet">${sheetHead('Проверь и запиши')}
+    <div class="kl-recs"><div><span>Из истории</span><b>${st}</b></div><div><span>По логике</span><b>${items.length - st}</b></div>${d.read ? `<div><span>Прочитаны посты</span><b>#${esc(d.read.from)}–#${esc(d.read.to ?? '…')}</b></div>` : ''}</div>
+    ${d.errs?.length ? `<div class="kl-warn">${ic('alert')}<div><b>Не всё получилось</b>${d.errs.slice(0, 3).map(e => `<div>${esc(C.cut(e, 180))}</div>`).join('')}<div>Непрочитанное «По истории» дочитает в следующий раз.</div></div></div>` : ''}
+    ${d.stopped ? '<div class="kl-hint">Остановлено — лист по тому, что успела.</div>' : ''}
+    ${items.length ? `<div class="kl-chips wrap">${btn('fiAll', 'Все', '', 'sm ghost')}${btn('fiNone', 'Ничего', '', 'sm ghost')}${btn('fiOnly', 'Только история', attr({ v: 'story' }), 'sm ghost')}${btn('fiOnly', 'Только логика', attr({ v: 'logic' }), 'sm ghost')}</div>
+    ${[...groups.entries()].map(block).join('')}` : empty('Нового не нашлось — в Клинике уже всё, что есть в истории и следует по логике.')}
+    <div class="kl-fillbar">${btn('fiDrop', `${ic('trash')} Отбросить`, '', 'ghost')}${btn('fiApply', `${ic('check')} Записать · ${on}`, on ? '' : 'disabled', 'primary')}</div></div>`;
+}
 
 // общие формы
 function formSheet() {
@@ -749,6 +879,51 @@ const HANDLERS = {
     delImplant: (el) => { const p = C.P(el.dataset.who); p.implants = p.implants.filter(x => x.id !== el.dataset.id); afterSoft(); },
     crack: (el) => { const p = C.P(el.dataset.who); const v = el.dataset.v; p.cracks = p.cracks.includes(v) ? p.cracks.filter(x => x !== v) : [...p.cracks, v]; afterSoft(); },
     fillPat: async (el) => { const who = C.canon(el.dataset.who); await withBusy(`fill:${who}`, async () => { await C.fillPatient(who); C.toast('success', 'Медкарта заполнена по лорбукам — проверь'); }); },
+    // по истории и логике
+    fillOpen: (el) => { const who = el.dataset.who ? C.canon(el.dataset.who) : ''; modal('fill', { who, stage: !H.run.on && H.draft()?.items?.length ? 'review' : 'start', story: true, logic: true, fresh: false }); },
+    fillShow: () => modal('fill', { who: H.draft()?.who || '', stage: 'review', story: true, logic: true }),
+    fiOpt: (el) => { const v = el.dataset.v; ui.modal[v] = !ui.modal[v]; ui.modal.keep = true; paintModal(); },
+    fiPpl: (el) => { const m = ui.modal; const n = el.dataset.v; const cur = m.people || C.patients(); m.people = cur.some(x => C.same(x, n)) ? cur.filter(x => !C.same(x, n)) : [...cur, n]; m.keep = true; paintModal(); },
+    fiGo: async () => {
+        const m = ui.modal;
+        if (H.run.on) return;
+        const onStep = () => { if (ui.modal?.kind === 'fill') { ui.modal.keep = true; paintModal(); } renderSoon(); };
+        try {
+            const d = await H.fill({ who: m.who || '', story: !!m.story, logic: !!m.logic, fresh: !!m.fresh, people: m.who ? [m.who] : m.people, onStep });
+            if (ui.modal?.kind === 'fill') { ui.modal.stage = 'review'; ui.modal.keep = false; paintModal(); }
+            else C.toast('success', `По истории и логике: ${d.items.length} на проверку — Клиника → Пациенты`);
+            renderSoon();
+        } catch (e) { C.toast('error', esc(String(e?.message || e))); if (ui.modal?.kind === 'fill') paintModal(); }
+    },
+    fiStop: () => { H.run.stop = true; if (ui.modal) ui.modal.keep = true; paintModal(); },
+    fiTog: (el) => { const x = H.draft()?.items.find(y => y.id === el.dataset.id); if (!x) return; x.on = !x.on; C.save(); ui.modal.keep = true; paintModal(); },
+    fiAll: () => { for (const x of H.draft()?.items || []) x.on = true; C.save(); ui.modal.keep = true; paintModal(); },
+    fiNone: () => { for (const x of H.draft()?.items || []) x.on = false; C.save(); ui.modal.keep = true; paintModal(); },
+    fiOnly: (el) => { for (const x of H.draft()?.items || []) x.on = x.src === el.dataset.v; C.save(); ui.modal.keep = true; paintModal(); },
+    fiApply: () => { const r = H.apply(); C.toast('success', `Записано в Клинику: ${r.n}. Отменить пачку — внизу медкарты`); ui.modal = null; paintModal(); render(); },
+    fiDrop: (el) => { if (!confirmIn(el)) return; H.dropDraft(); ui.modal = null; paintModal(); render(); },
+    fillUndo: (el) => { if (!confirmIn(el)) return; const n = H.undo(el.dataset.id); C.toast('success', `Отменено записей: ${n}`); render(); },
+    // диагнозы и анамнез руками
+    pastConds: () => { ui.pastConds = !ui.pastConds; render(); },
+    allHist: () => { ui.allHist = !ui.allHist; render(); },
+    formCond: (el) => {
+        const who = C.canon(el.dataset.who || ui.who);
+        form(`Диагноз · ${C.short(who)}`, [{ k: 't', label: 'Что', ph: 'анемия, ПТСР, мигрень…' }, { k: 'st', label: 'Как сейчас', type: 'select', value: 'active', opts: Object.entries(C.COND_ST) }, { k: 'day', label: 'С какого дня', type: 'date', value: C.storyDay(), hint: 'необязательно' }, { k: 'why', label: 'Заметка', ph: 'откуда, чем лечат' }],
+            (v) => { if (!C.addCond(who, { ...v, day: v.day || null })) { C.toast('info', 'Что за диагноз?'); return false; } return true; });
+    },
+    condMenu: (el) => {
+        const who = C.canon(el.dataset.who);
+        const c = C.P(who).conds.find(x => x.id === el.dataset.id);
+        if (!c) return;
+        form(`Диагноз · ${C.short(who)}`, [{ k: 't', label: 'Что', value: c.t }, { k: 'st', label: 'Как сейчас', type: 'select', value: c.st, opts: Object.entries(C.COND_ST) }, { k: 'day', label: 'С какого дня', type: 'date', value: c.day || '' }, { k: 'to', label: 'До', type: 'date', value: c.to || '', hint: 'если прошло' }, { k: 'why', label: 'Заметка', value: c.why || '' }],
+            (v) => { if (!String(v.t || '').trim()) return false; Object.assign(c, { t: C.cut(v.t.trim(), 90), st: C.COND_ST[v.st] ? v.st : c.st, day: v.day || '', to: v.to || '', why: C.cut(v.why || '', 200) }); if (c.to && c.st !== 'past') c.st = 'past'; C.touch(); return true; },
+            { del: () => { C.delRec(who, 'conds', c.id); return true; } });
+    },
+    formHist: (el) => {
+        const who = C.canon(el.dataset.who || ui.who);
+        form(`Анамнез · ${C.short(who)}`, [{ k: 'kind', label: 'Что', type: 'select', value: 'inj', opts: [['inj', 'травма'], ['proc', 'процедура или операция'], ['ill', 'болезнь'], ['lab', 'анализы'], ['note', 'другое']] }, { k: 't', label: 'Коротко', ph: 'перелом левой ключицы, удаление аппендикса…' }, { k: 'part', label: 'Где', ph: 'необязательно' }, { k: 'day', label: 'Когда', type: 'date', value: '' }, { k: 'by', label: 'Кто лечил', ph: 'необязательно' }],
+            (v) => { if (!C.addHist(who, v)) { C.toast('info', 'Что было?'); return false; } return true; });
+    },
     hidePat: (el) => { if (!confirmIn(el)) return; C.hidePatient(el.dataset.who, true); ui.who = C.patients()[0] || ''; render(); },
     unhide: (el) => { C.hidePatient(el.dataset.v, false); ui.who = el.dataset.v; render(); },
 
@@ -756,9 +931,15 @@ const HANDLERS = {
     newDoc: () => { const d = C.addDoc({ name: 'Новый врач', role: 'other' }); modal('doc', { id: d.id }); renderSoon(); },
     docView: (el) => modal('doc', { id: el.dataset.id }),
     delDoc: (el) => { if (!confirmIn(el)) return; C.delDoc(el.dataset.id); closeModal(); },
-    docFill: async (el) => { await withBusy(`fill:${el.dataset.id}`, async () => { await C.fillDoc(el.dataset.id); if (ui.modal) { ui.modal.keep = false; } C.toast('success', 'Досье заполнено — пустые поля из лорбука'); }); },
+    docFill: async (el) => {
+        const d = C.realDoc(el.dataset.id);
+        if (!d) return;
+        if (ui.modal?.kind === 'doc') ui.modal.id = d.id;
+        await withBusy(`fill:${d.id}`, async () => { await C.fillDoc(d.id); if (ui.modal) { ui.modal.keep = false; } C.toast('success', 'Досье заполнено — пустые поля из лорбука'); });
+    },
     docDraw: async (el) => {
-        const d = C.docById(el.dataset.id);
+        const d = C.realDoc(el.dataset.id);
+        if (d && ui.modal?.kind === 'doc') ui.modal.id = d.id;
         if (!d) return;
         await withBusy(`draw:${d.id}`, async () => {
             if (!C.A?.drawPicture) throw new Error('Рисую через Life → Гардероб, а их нет. Можно загрузить фото.');
@@ -781,10 +962,20 @@ const HANDLERS = {
             { k: 'd', label: 'Дата', type: 'date', value: p?.d || C.dayAdd(C.storyDay(), 7) },
             { k: 'time', label: 'Время', type: 'time', value: p?.time || '' },
             { k: 'note', label: 'Заметка', value: p?.note || '' },
-        ], (v) => { if (p) { Object.assign(p, { who: v.who, doc: v.doc, kind: v.kind, d: v.d || p.d, time: v.time, note: v.note, st: p.st === 'miss' ? 'plan' : p.st }); C.touch(); } else C.addPlan(v); return true; }, { del: p ? () => { C.delPlan(p.id); return true; } : null });
+        ], (v) => {
+            if (p) {
+                // запись из поста: правка — и она своя насовсем
+                const r = /^pp:/.test(p.id) ? C.realPlan(p.id) : p;
+                if (!r) return true;
+                const doc = /^pd:/.test(String(v.doc)) ? C.realDoc(v.doc)?.id || '' : v.doc;
+                Object.assign(r, { who: v.who, doc, kind: v.kind, d: v.d || r.d, time: v.time, note: v.note, st: r.st === 'miss' ? 'plan' : r.st });
+                C.touch();
+            } else C.addPlan(v);
+            return true;
+        }, { del: p ? () => { C.delPlan(p.id); return true; } : null });
     },
     planGo: (el) => { const p = C.planById(el.dataset.id); if (!p) return; startVisit(p.who, { vk: p.kind, doc: p.doc, plan: p.id, reason: p.note, docLock: !!p.doc }); },
-    planMiss: (el) => { const p = C.planById(el.dataset.id); if (p) { p.st = 'miss'; C.touch(); render(); } },
+    planMiss: (el) => { const p = C.realPlan(el.dataset.id); if (p) { p.st = 'miss'; C.touch(); render(); } },
 
     // формы
     formSave: () => { const m = ui.modal; const ok = m.onSave?.(formVals()); if (ok === false) return; if (m.back) { ui.modal = { ...m.back, keep: false }; paintModal(); return; } closeModal(); },
@@ -851,7 +1042,9 @@ export function onChange(e) {
     }
     if (ent === 'zdoc') { C.zDocSet(id, key, v); if (key === 'name' || key === 'zrole') renderSoon(); return; }
     if (ent === 'doc') {
-        const d = C.M().docs.find(x => x.id === id);
+        let d = C.M().docs.find(x => x.id === id);
+        // врач из поста: тронула досье — остаётся насовсем
+        if (!d && /^pd:/.test(String(id))) { d = C.realDoc(id); if (d && ui.modal?.kind === 'doc') { ui.modal.id = d.id; ui.modal.keep = true; } }
         if (!d) return;
         if (key === 'who') d.who = v.split(',').map(s => C.canon(s.trim())).filter(Boolean);
         else if (key === 'phrases') d.phrases = v.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 8);
@@ -890,8 +1083,9 @@ async function upload(el) {
         });
         return;
     }
-    const d = C.M().docs.find(x => x.id === el.dataset.id);
+    const d = C.M().docs.find(x => x.id === el.dataset.id) || (/^pd:/.test(String(el.dataset.id)) ? C.realDoc(el.dataset.id) : null);
     if (!d) return;
+    if (ui.modal?.kind === 'doc') ui.modal.id = d.id;
     await withBusy(`draw:${d.id}`, async () => {
         if (!C.A?.uploadImage || !C.A?.fileToJpeg) throw new Error('Загрузка картинок — через Life, а его нет');
         d.img = await C.A.uploadImage(await C.A.fileToJpeg(file, 900), 'klinika_doc');

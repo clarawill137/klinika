@@ -1,9 +1,11 @@
 // ✦ Клиника — ядро: состояние чата, эпоха, пациенты и медкарты, врачи, приёмы с исходами на выбор, снимки,
 // план приёмов (→ календарь Life), заметка модели, поле Летописца, умная модель.
 //
-// Счёт по постам — как в Ангаре: всё, что Летописец увидел в посте (взвесили, давление, назначили, был приём, снимок),
-// лежит записью ПОСТА под ключом «вариант : хеш текста». Свайпнула или удалила пост — его записи выпали сами.
-// То, что она завела руками или выбрала исходом приёма, — обычные записи медкарты.
+// Счёт по постам — как в Ангаре: всё, что Летописец увидел в посте (взвесили, давление, назначили, был приём, снимок,
+// поставили диагноз, наложили швы, сдали анализы, выяснилась аллергия, появился врач, записали к врачу), лежит записью
+// ПОСТА под ключом «вариант : хеш текста». Свайпнула или удалила пост — его записи выпали сами. Её собственные посты
+// Летописец Life не читает — их читает Клиника сама (моделью Летописца, только медицинские).
+// То, что она завела руками, выбрала исходом приёма или записала из «По истории и логике», — обычные записи медкарты.
 
 import * as D from './data.js';
 
@@ -12,7 +14,7 @@ export function setApi(a) { A = a; }
 
 const ctx = () => SillyTavern.getContext();
 export const MODULE = 'klinika';
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 // ───────────── мелочи ─────────────
 
@@ -80,7 +82,8 @@ function toDay(x) {
 
 const DEF = {
     on: true,
-    chron: true,          // поле в Летописце: вес, давление, лекарства, приёмы и снимки из постов
+    chron: true,          // поле в Летописце: вес, давление, лекарства, диагнозы, процедуры, приёмы, снимки, врачи, записи
+    userPosts: true,      // её посты тоже: Клиника читает их сама (моделью Летописца, только медицинские)
     prompt: 'auto',       // auto — заметка модели, когда есть что сказать; always; off
     model: 'deep',        // deep — умная модель Life; chron — модель Летописца
     dice: true,           // кубик подсказывает, какой из исходов приёма «выпал»
@@ -101,7 +104,12 @@ export function cfg() {
 export const saveCfg = () => { try { ctx().saveSettingsDebounced(); } catch { /* */ } };
 
 function blank() {
-    return { v: 1, ver: 0, seeded: {}, docs: [], pats: {}, visits: [], scans: [], plan: [], posts: {}, shots: [], hidden: [], log: [] };
+    return {
+        v: 1, ver: 0, seeded: {}, docs: [], pats: {}, visits: [], scans: [], plan: [], posts: {}, shots: [], hidden: [], log: [],
+        // 0.3.0: пачки «По истории и логике» (их можно отменить), непросмотренный лист, до какого поста прочитана история,
+        // врачи и записи из постов, которые она убрала руками
+        fills: [], fillDraft: null, histScan: { upTo: -1, at: 0 }, dropDocs: [], dropPlans: [],
+    };
 }
 export function M() {
     const md = ctx().chatMetadata;
@@ -114,6 +122,7 @@ export function M() {
         else if (Array.isArray(v) && !Array.isArray(m[k])) m[k] = v;
         else if (v && typeof v === 'object' && !Array.isArray(v) && (typeof m[k] !== 'object' || Array.isArray(m[k]) || !m[k])) m[k] = v;
     }
+    if (m.fillDraft && (typeof m.fillDraft !== 'object' || !Array.isArray(m.fillDraft.items))) m.fillDraft = null;
     return m;
 }
 export const hasChat = () => { try { return A?.hasChat ? A.hasChat() : !!ctx().chatMetadata; } catch { return false; } };
@@ -231,7 +240,9 @@ export function guessSex(n) {
     if (M_NAMES.test(s)) return 'M';
     return /[ая]$/.test(s.split(' ')[0]) ? 'F' : '';
 }
-const PAT = () => ({ name: '', sex: '', age: '', height: 0, baseKg: 0, blood: '', allergy: '', special: '', norms: '', notes: '', implants: [], cracks: [], weights: [], vitals: [], labs: [], meds: [] });
+// conds — диагнозы и состояния { id, t, st: active|chronic|past|risk|habit, day, to, why, src, mes, batch };
+// hist — анамнез { id, kind: inj|proc|ill|lab|note, t, part, by, care, day, src, mes, batch }
+const PAT = () => ({ name: '', sex: '', age: '', height: 0, baseKg: 0, blood: '', allergy: '', special: '', norms: '', notes: '', implants: [], cracks: [], weights: [], vitals: [], labs: [], meds: [], conds: [], hist: [] });
 /** Медкарта (создаёт при первом обращении). */
 export function P(who) {
     const m = M();
@@ -621,24 +632,72 @@ function dayOfMes(i) {
     }
     return storyDay();
 }
+/** Дата истории у поста i (по Horae этого или ближайшего раньше поста). */
+export const dayOf = (i) => (Number.isFinite(Number(i)) && Number(i) >= 0 ? dayOfMes(Number(i)) : '');
 
 function sig() { const c = chat(); return `${M().ver}|${c.length}|${keyOf(c[c.length - 1])}`; }
+const KINDS_EV = ['w', 'v', 'med', 'visit', 'scan', 'h', 'ill', 'proc', 'lab', 'allergy', 'doc', 'plan'];
 /** Что Летописец видел в постах, которые сейчас в чате. */
 export function world() {
     const s = sig();
     if (memo && memo.s === s) return memo.w;
     const store = M().posts;
     const c = chat();
-    const W = { w: [], v: [], med: [], visit: [], scan: [], h: [] };
+    const W = Object.fromEntries(KINDS_EV.map(k => [k, []]));
     for (let i = 0; i < c.length; i++) {
-        const rec = store[keyOf(c[i])];
+        const key = keyOf(c[i]);
+        const rec = store[key];
         if (!rec || !Array.isArray(rec.ev)) continue;
         const day = dayOfMes(i);
-        rec.ev.forEach((e, n) => { if (W[e.t]) W[e.t].push({ ...e, id: `p${i}_${n}`, day, mes: i, src: 'post' }); });
+        // id записи не зависит от номера поста и соседних записей: удалили пост выше или одну запись — ссылки живы
+        const hk = hash(key).slice(0, 7);
+        rec.ev.forEach((e, n) => { if (W[e.t]) W[e.t].push({ ...e, id: `p${hk}_${e.k ?? n}`, day, mes: i, src: 'post' }); });
     }
     memo = { s, w: W };
     return W;
 }
+
+// ───────────── похожие тексты и имена врачей ─────────────
+
+const words = (s) => norm(s).replace(/[^a-zа-я0-9\s-]/g, ' ').split(/[\s-]+/).filter(Boolean);
+/** Одно и то же по смыслу: «анемия» и «Анемия беременных», «перелом левого предплечья» и «перелом предплечья слева». */
+export function sim(a, b) {
+    const x = norm(a).replace(/[^a-zа-я0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const y = norm(b).replace(/[^a-zа-я0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!x || !y) return false;
+    if (x === y || (x.length >= 5 && y.includes(x)) || (y.length >= 5 && x.includes(y))) return true;
+    const st = (w) => w.slice(0, Math.max(4, Math.min(6, w.length - 1)));
+    const wa = [...new Set(words(x).filter(w => w.length >= 4).map(st))];
+    const wb = new Set(words(y).filter(w => w.length >= 4).map(st));
+    if (!wa.length || !wb.size) return false;
+    const common = wa.filter(w => wb.has(w)).length;
+    return common >= Math.max(1, Math.ceil(Math.min(wa.length, wb.size) * 0.6));
+}
+/** Тот же человек по имени: «доктор Баретт» = «Амара Баретт»; у двух полных имён должна совпасть фамилия. */
+export function nameIs(a, b) {
+    if (!a || !b) return false;
+    if (same(a, b)) return true;
+    const st = (w) => w.slice(0, Math.min(5, w.length));
+    const skip = /^(доктор|док|врач|профессор|сестра|медсестра|dr|doctor|мисс|миссис|мистер|агент)$/;
+    const wa = words(a).filter(w => w.length >= 3 && !skip.test(w));
+    const wb = words(b).filter(w => w.length >= 3 && !skip.test(w));
+    if (!wa.length || !wb.length) return false;
+    if (wa.length >= 2 && wb.length >= 2) return st(wa[wa.length - 1]) === st(wb[wb.length - 1]) && (wa[0][0] === wb[0][0] || st(wa[0]) === st(wb[0]));
+    return wa.some(x => wb.some(y => x.length >= 4 && y.length >= 4 && st(x) === st(y)));
+}
+let nameReMemo = { k: '', re: /$^/ };
+/** Имена врачей (свои, Зёрнышка, засеянные) — для поиска медицины в посте. */
+export function docNameRe() {
+    const names = [...M().docs.map(d => d.name), ...zDocs().map(d => d.name), ...D.SEED_DOCS.map(d => d.name)].filter(Boolean);
+    const parts = [...new Set(names.flatMap(n => words(n).filter(w => w.length >= 4 && !/^(доктор|врач)$/.test(w)).map(w => w.slice(0, Math.min(6, w.length)))))];
+    const k = parts.join('|');
+    if (k !== nameReMemo.k) nameReMemo = { k, re: parts.length ? new RegExp(`(?:^|[^а-яёa-z])(?:${parts.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'i') : /$^/ };
+    return nameReMemo.re;
+}
+/** Есть ли в тексте медицина (для Летописца): слова и имена врачей. */
+export const medText = (t) => D.MED_RE.test(t) || docNameRe().test(norm(t));
+/** Её пост — только явная медицина (своя модель стоит денег): без «сердца» и «Камней» в романтическом смысле. */
+export const medStrong = (t) => D.STRONG_RE.test(t) || docNameRe().test(norm(t));
 
 // ───────────── чтение медкарты ─────────────
 
@@ -741,9 +800,190 @@ export function meds(who, day = storyDay()) {
 export const activeMeds = (who) => meds(who).filter(x => x.on);
 export function visits(who = '') {
     const own = M().visits;
-    const post = world().visit.map(e => ({ id: e.id, who: canon(e.who), day: e.day, doc: '', docName: e.doc, kind: 'custom', found: e.found, said: e.said, next: e.next ? { note: e.next } : null, src: 'post', mes: e.mes, tone: '' }));
+    // приёмы у врачей Зёрнышка (Васкез, педиатр) пишет само Зёрнышко — из поста их не дублирую
+    const zn = hasZD() ? zDocs().map(d => d.name).filter(Boolean) : [];
+    const post = world().visit.filter(e => !zn.some(n => nameIs(n, e.doc))).map(e => {
+        const d = e.doc ? docByName(e.doc) : null;
+        return { id: e.id, who: canon(e.who), day: e.day, doc: d?.id || '', docName: d?.name || e.doc, kind: guessKind(`${e.found} ${e.said}`, d), found: e.found, said: e.said, next: e.next ? { note: e.next } : null, src: 'post', mes: e.mes, tone: '' };
+    });
     const zl = hasZD() ? zVisits() : [];
     return [...own, ...post, ...zl].filter(v => !who || same(v.who, who)).sort(byDay);
+}
+
+// ───────────── диагнозы, анамнез, аллергии (0.3.0) ─────────────
+
+export const COND_ST = { active: 'сейчас', chronic: 'хроническое', past: 'было', risk: 'риск', habit: 'образ жизни' };
+/** Диагнозы и состояния: свои (руками, из истории, по логике) + из постов; «прошло» в посте закрывает своё. */
+export function conds(who) {
+    const own = P(who).conds.map(x => ({ ...x }));
+    for (const e of world().ill.filter(x => same(x.who, who)).sort(byDay)) {
+        if (e.st === 'gone') {
+            for (const x of own) if (sim(x.t, e.text) && x.st !== 'past') { x.st = 'past'; x.to = e.day; x.toMes = e.mes; }
+            continue;
+        }
+        const had = own.find(x => sim(x.t, e.text));
+        if (had) { if (had.st === 'past' && (!had.to || had.to <= e.day)) { had.st = e.st === 'chronic' ? 'chronic' : 'active'; had.to = ''; } continue; }
+        own.push({ id: e.id, t: e.text, st: e.st === 'chronic' ? 'chronic' : 'active', day: e.day, src: 'post', mes: e.mes });
+    }
+    const rank = { active: 0, chronic: 1, risk: 2, habit: 3, past: 4 };
+    return own.sort((a, b) => (rank[a.st] ?? 5) - (rank[b.st] ?? 5) || String(b.day || '').localeCompare(String(a.day || '')));
+}
+/** Анамнез: травмы из Life (и зажившие, и шрамы), свои записи, процедуры и анализы из постов. Новое сверху. */
+export function history(who) {
+    const out = [];
+    try {
+        const h = chatMeta().hurt?.chars || {};
+        const c = h[canon(who)] || Object.entries(h).find(([k]) => same(k, who))?.[1];
+        const at = (m) => (Number.isFinite(Number(m)) && Number(m) >= 0 ? Number(m) : null);
+        for (const w of arr(c?.list)) {
+            if (!w || w.status === 'gone') continue;
+            const mes = at(w.mes ?? w.at?.mes);
+            out.push({ id: `life:${w.id}`, kind: 'inj', t: str(w.t), part: str(w.part), care: Math.round(num(w.care)), sev: num(w.sev, 2), day: mes != null ? dayOfMes(mes) : '', healed: w.status === 'healed', healedDay: at(w.healedMes) != null ? dayOfMes(at(w.healedMes)) : '', src: 'life', mes, lk: str(w.kind) });
+        }
+        for (const s of arr(c?.scars)) { const mes = at(s?.mes); out.push({ id: `scar:${s.id}`, kind: 'scar', t: str(s.t), day: mes != null ? dayOfMes(mes) : '', src: 'life', mes }); }
+    } catch { /* */ }
+    for (const x of P(who).hist) out.push({ ...x });
+    const W = world();
+    for (const e of W.proc.filter(x => same(x.who, who))) out.push({ id: e.id, kind: 'proc', t: e.text, by: e.by, day: e.day, src: 'post', mes: e.mes });
+    for (const e of W.lab.filter(x => same(x.who, who))) out.push({ id: e.id, kind: 'lab', t: e.text, day: e.day, src: 'post', mes: e.mes });
+    return out.sort((a, b) => String(b.day || '').localeCompare(String(a.day || '')) || (num(b.mes, -1) - num(a.mes, -1)));
+}
+/** Аллергия: из медкарты и выяснившаяся в постах. */
+export function allergyText(who) {
+    const own = str(P(who).allergy);
+    const post = [...new Set(world().allergy.filter(e => same(e.who, who)).map(e => e.text))].filter(t => !own || !sim(own, t));
+    return [own && !/^(нет|не знаю|—|-)$/i.test(own) ? own : '', ...post].filter(Boolean).join('; ');
+}
+export function addCond(who, x, extra = {}) {
+    const t = cut(str(x?.t), 90);
+    if (!t) return null;
+    const c = { id: uid(), t, st: COND_ST[str(x.st)] ? str(x.st) : 'active', day: isDay(x.day) ? x.day : x.day === null ? '' : storyDay(), to: '', why: cut(str(x.why), 200), src: 'hand', ...extra };
+    P(who).conds.push(c);
+    touch();
+    return c;
+}
+const HIST_KINDS = ['inj', 'proc', 'ill', 'lab', 'note'];
+export function addHist(who, x, extra = {}) {
+    const t = cut(str(x?.t), 200);
+    if (!t) return null;
+    const h = { id: uid(), kind: HIST_KINDS.includes(str(x.kind)) ? str(x.kind) : 'note', t, part: cut(str(x.part), 50), by: cut(str(x.by), 60), care: Math.max(0, Math.min(3, Math.round(num(x.care)))), day: isDay(x.day) ? x.day : '', src: 'hand', ...extra };
+    P(who).hist.push(h);
+    touch();
+    return h;
+}
+
+// ───────────── врачи и записи из постов (0.3.0) ─────────────
+// Летописец видит: в посте появился врач, которого нет в Клинике, или договорились о приёме. Это записи поста —
+// свайпнула пост, и их нет. Тронула такого врача (досье, приём) или запись (правка, «Начать») — они остаются насовсем.
+
+/** Вид приёма по словам и роли врача. */
+export function guessKind(text, doc = null) {
+    const t = norm(text);
+    if (/зуб|стомат|дантист|пломб/.test(t)) return 'dent';
+    if (/протез|бионик|сервопривод|вибраниум/.test(t)) return 'arm';
+    if (/узи|беремен|акушер|гинеколог|плод|скрининг/.test(t)) return 'preg';
+    if (/педиатр|малыш|младен/.test(t)) return 'peds';
+    if (/экг|кардио|сердц|аритм|камн/.test(t)) return 'cardio';
+    if (/мрт|невролог|сотрясен|голов[аеуы]|мигрен/.test(t)) return 'head';
+    if (/психотерап|психиатр|терапевтическ.{0,4}сесс|кошмар|птср/.test(t)) return 'psych';
+    if (/перелом|швы|шов|рентген|травм|ранени|гипс|вывих/.test(t)) return 'trauma';
+    if (/анализ|кровь на|сдать кровь/.test(t)) return 'labs';
+    if (doc?.role) { const v = D.VISITS.find(x => x.roles.includes(doc.role) && x.id !== 'custom'); if (v) return v.id; }
+    return 'general';
+}
+const WEEK = [['понедельник', 1], ['вторник', 2], ['сред', 3], ['четверг', 4], ['пятниц', 5], ['суббот', 6], ['воскресен', 0]];
+const NUMW = [['одн', 1], ['два', 2], ['две', 2], ['пар', 2], ['три', 3], ['четыр', 4], ['пят', 5], ['шест', 6], ['сем', 7], ['восем', 8], ['девят', 9], ['десят', 10], ['нескольк', 3]];
+/** «через неделю», «через 3 дня», «через пару месяцев», «завтра», «в пятницу» → через сколько дней от day. */
+export function relDays(text, day = storyDay()) {
+    const s = norm(text);
+    if (!s) return null;
+    if (/послезавтра/.test(s)) return 2;
+    if (/(?:^|[^а-я])завтра/.test(s)) return 1;
+    const m = s.match(/через\s+(\d+\s*|[а-я]+\s+)?(дн|ден|сут|недел|месяц|мес)/);
+    if (m) {
+        let n = 1;
+        if (m[1] && /\d/.test(m[1])) n = +m[1].trim();
+        else if (m[1]) n = NUMW.find(([w]) => m[1].trim().startsWith(w))?.[1] ?? 1;
+        return m[2].startsWith('недел') ? n * 7 : m[2].startsWith('мес') ? n * 30 : n;
+    }
+    const wd = WEEK.find(([w]) => new RegExp(`(?:^|[^а-я])(?:в|во|к|на)\\s+${w}`).test(s));
+    if (wd && isDay(day)) {
+        const cur = new Date(`${day}T12:00:00Z`).getUTCDay();
+        const d = (wd[1] - cur + 7) % 7;
+        return d === 0 ? 7 : d;
+    }
+    return null;
+}
+/** Врач по имени из текста: свои, Зёрнышка, из постов. */
+export function docByName(name) {
+    if (!str(name)) return null;
+    return allDocs().find(d => nameIs(d.name, name)) || docs(true).find(d => nameIs(d.name, name)) || null;
+}
+const pdId = (name) => `pd:${hash(norm(name))}`;
+/** Врачи, появившиеся в постах (и ещё не в Клинике). */
+export function postDocs() {
+    const out = [];
+    const m = M();
+    const zn = zDocs().map(d => d.name);
+    for (const e of world().doc) {
+        const id = pdId(e.name);
+        if (out.some(d => d.id === id || nameIs(d.name, e.name))) continue;
+        if (m.dropDocs.includes(id) || m.docs.some(d => d.from === id || nameIs(d.name, e.name)) || zn.some(n => nameIs(n, e.name))) continue;
+        const d = normDoc({ name: e.name, role: e.role, title: e.title, place: e.place, era: eraOn(e.day).id, src: 'post' });
+        out.push({ ...d, id, mes: e.mes, day: e.day, post: true });
+    }
+    return out;
+}
+/** Сделать врача из поста настоящим (тронула досье или ведёт приём). Свой врач — как есть. */
+export function realDoc(id) {
+    const s = String(id || '');
+    if (!/^pd:/.test(s)) return docById(s);
+    const had = M().docs.find(d => d.from === s);
+    if (had) return had;
+    const p = postDocs().find(d => d.id === s);
+    if (!p) return null;
+    const d = normDoc({ ...p, id: uid(), src: 'post', from: s, mes: p.mes });
+    M().docs.push(d);
+    touch();
+    return d;
+}
+/** Записи к врачу из постов: «договорились на пятницу», «Амара велела прийти через неделю». */
+export function postPlans() {
+    const out = [];
+    const m = M();
+    const W = world();
+    const add = (e, tag, d, note, docName) => {
+        if (!isDay(d)) return;
+        const id = `pp:${e.id}${tag}`;
+        if (m.dropPlans.includes(id) || m.plan.some(p => p.from === id)) return;
+        const doc = docName ? docByName(docName) : null;
+        if (doc?.z) return;   // следующий приём у Васкез и педиатра считает Зёрнышко
+        if (m.plan.some(p => same(p.who, e.who) && p.d === d)) return;
+        if (out.some(p => same(p.who, e.who) && p.d === d)) return;
+        // была ли встреча: любой приём у того же врача (или вообще, если врач не назван) после поста и до недели за датой
+        const done = visits(e.who).some(v => v.day && v.day > e.day && v.day <= dayAdd(d, 7) && (!doc || v.doc === doc.id || nameIs(v.docName, doc.name)));
+        const today = storyDay();
+        const old = !done && today && d < dayAdd(today, -14);
+        out.push({ id, who: canon(e.who), doc: doc?.id || '', docName: doc?.name || docName || '', kind: guessKind(`${note} ${docName}`, doc), d, time: '', note: cut(str(note), 160), st: done ? 'done' : old ? 'miss' : 'plan', src: 'post', mes: e.mes });
+    };
+    for (const e of W.plan) add(e, '', e.date || (e.days ? dayAdd(e.day, e.days) : relDays(e.note, e.day) ? dayAdd(e.day, relDays(e.note, e.day)) : ''), e.note, e.doc);
+    for (const e of W.visit) { if (!e.next) continue; const n = relDays(e.next, e.day); if (n) add(e, 'n', dayAdd(e.day, n), e.next, e.doc); }
+    return out;
+}
+/** Сделать запись из поста настоящей. */
+export function realPlan(id) {
+    const s = String(id || '');
+    if (!/^pp:/.test(s)) return M().plan.find(p => p.id === s) || null;
+    const had = M().plan.find(p => p.from === s);
+    if (had) return had;
+    const p = postPlans().find(x => x.id === s);
+    if (!p) return null;
+    const doc = p.doc && /^pd:/.test(p.doc) ? realDoc(p.doc) : null;
+    const r = { ...p, id: uid(), doc: doc?.id || p.doc, from: s, src: 'post' };
+    delete r.docName;
+    M().plan.push(r);
+    touch();
+    return r;
 }
 export function scans(who = '', kind = '') {
     const own = M().scans;
@@ -851,14 +1091,27 @@ export function normDoc(x = {}) {
         character: cut(str(x.character), 800), speech: cut(str(x.speech), 500), regalia: cut(str(x.regalia), 600), knows: cut(str(x.knows), 700),
         phrases: arr(x.phrases).map(s => cut(str(s), 140)).filter(Boolean).slice(0, 8), who: arr(x.who).map(canon).filter(Boolean).slice(0, 8),
         img: str(x.img), src: str(x.src) || 'hand', at: Date.now(),
+        ...(str(x.from) ? { from: str(x.from) } : {}), ...(Number.isFinite(Number(x.mes)) && x.mes !== '' && x.mes != null ? { mes: Number(x.mes) } : {}), ...(str(x.batch) ? { batch: str(x.batch) } : {}), ...(str(x.why) ? { why: cut(str(x.why), 200) } : {}),
     };
 }
 export const docs = (all = false) => M().docs.filter(d => all || d.era === era().id);
-export const docById = (id) => { if (isZ(id)) { const z = zDocRaw(id); return z ? zAsDoc(z) : null; } return M().docs.find(d => d.id === id) || null; };
+export const docById = (id) => {
+    if (isZ(id)) { const z = zDocRaw(id); return z ? zAsDoc(z) : null; }
+    if (/^pd:/.test(String(id || ''))) return M().docs.find(d => d.from === id) || postDocs().find(d => d.id === id) || null;
+    return M().docs.find(d => d.id === id) || null;
+};
 export function addDoc(x = {}) { const d = normDoc(x); M().docs.push(d); touch(); return d; }
-export function delDoc(id) { if (isZ(id)) { zDelDoc(id); return; } const m = M(); m.docs = m.docs.filter(d => d.id !== id); touch(); }
-/** Все врачи эпохи: свои + врачи Зёрнышка (Васкез, педиатр). */
-export const allDocs = () => [...docs(), ...(hasZ() ? zDocs().map(zAsDoc) : [])];
+export function delDoc(id) {
+    if (isZ(id)) { zDelDoc(id); return; }
+    const m = M();
+    if (/^pd:/.test(String(id || ''))) { if (!m.dropDocs.includes(id)) m.dropDocs.push(id); touch(); return; }
+    const d = m.docs.find(x => x.id === id);
+    if (d?.from && !m.dropDocs.includes(d.from)) m.dropDocs.push(d.from);
+    m.docs = m.docs.filter(x => x.id !== id);
+    touch();
+}
+/** Все врачи эпохи: свои + врачи Зёрнышка (Васкез, педиатр) + появившиеся в постах. */
+export const allDocs = () => [...docs(), ...(hasZ() ? zDocs().map(zAsDoc) : []), ...postDocs().filter(d => d.era === era().id)];
 /** Кого предложить на приём: сначала по роли, потом лечащего, потом любого. */
 export function docFor(kind, who = '') {
     const v = D.visitById(kind);
@@ -883,28 +1136,39 @@ export const clearLore = () => LORE_CACHE.clear();
 // ───────────── план приёмов (→ календарь Life) ─────────────
 
 export function addPlan(x) {
+    const doc = /^pd:/.test(str(x.doc)) ? realDoc(x.doc) : null;
     const p = {
-        id: uid(), who: canon(x.who) || userName(), doc: str(x.doc), kind: D.VISITS.some(v => v.id === x.kind) ? x.kind : 'general',
+        id: uid(), who: canon(x.who) || userName(), doc: doc?.id || str(x.doc), kind: D.VISITS.some(v => v.id === x.kind) ? x.kind : 'general',
         d: isDay(x.d) ? x.d : dayAdd(storyDay(), 7) || storyDay(), time: /^\d{1,2}:\d{2}$/.test(str(x.time)) ? x.time : '', note: cut(str(x.note), 160), st: 'plan', src: str(x.src) || 'hand',
+        ...(str(x.batch) ? { batch: str(x.batch) } : {}), ...(str(x.why) ? { why: cut(str(x.why), 200) } : {}), ...(str(x.from) ? { from: str(x.from) } : {}),
     };
     M().plan.push(p);
     touch();
     return p;
 }
-export const planById = (id) => M().plan.find(p => p.id === id) || null;
-export function delPlan(id) { const m = M(); m.plan = m.plan.filter(p => p.id !== id); touch(); }
+export const planById = (id) => M().plan.find(p => p.id === id) || (/^pp:/.test(String(id || '')) ? M().plan.find(p => p.from === id) || postPlans().find(p => p.id === id) : null) || null;
+export function delPlan(id) {
+    const m = M();
+    if (/^pp:/.test(String(id || ''))) { if (!m.dropPlans.includes(id)) m.dropPlans.push(id); touch(); return; }
+    const p = m.plan.find(x => x.id === id);
+    if (p?.from && !m.dropPlans.includes(p.from)) m.dropPlans.push(p.from);
+    m.plan = m.plan.filter(x => x.id !== id);
+    touch();
+}
+/** Все записи: свои + из постов. */
+export const allPlans = () => [...M().plan, ...postPlans()];
 export function planList({ from = '', to = '', who = '' } = {}) {
-    return M().plan.filter(p => (!who || same(p.who, who)) && (!from || p.d >= from) && (!to || p.d <= to)).sort((a, b) => (a.d + a.time).localeCompare(b.d + b.time));
+    return allPlans().filter(p => (!who || same(p.who, who)) && (!from || p.d >= from) && (!to || p.d <= to)).sort((a, b) => (a.d + a.time).localeCompare(b.d + b.time));
 }
 export const planToday = () => planList({ from: storyDay(), to: storyDay() }).filter(p => p.st === 'plan');
-export const planMissed = () => M().plan.filter(p => p.st === 'plan' && storyDay() && p.d < storyDay());
-export function docLabel(id) { const d = docById(id); return d ? d.name : ''; }
+export const planMissed = () => allPlans().filter(p => p.st === 'plan' && storyDay() && p.d < storyDay());
+export function docLabel(id, fallback = '') { const d = docById(id); return d ? d.name : fallback; }
 /** Для календаря Life. */
 export function calEvents(from, to) {
     if (!cfg().on || !hasChat()) return [];
     return planList({ from, to }).filter(p => p.st !== 'miss').map(p => ({
         key: `kl:${p.id}`, d: p.d, time: p.time || '', kind: 'appointment', who: [p.who],
-        title: `${docLabel(p.doc) ? `${short(docLabel(p.doc))} · ` : ''}${D.visitById(p.kind).name}${p.st === 'done' ? ' ✓' : ''}`,
+        title: `${docLabel(p.doc, p.docName) ? `${short(docLabel(p.doc, p.docName))} · ` : ''}${D.visitById(p.kind).name}${p.st === 'done' ? ' ✓' : ''}`,
     }));
 }
 
@@ -1028,6 +1292,7 @@ export function addScan(x) {
         id: uid(), who: canon(x.who) || userName(), day: isDay(x.day) ? x.day : storyDay(), kind: D.SCANS[x.kind] ? x.kind : 'xray',
         area: areaId(x.kind, x.area, x.text), finds: normFinds(x.finds), text: cut(str(x.text), 600), imp: cut(str(x.imp), 160),
         rhythm: D.RHYTHMS[str(x.rhythm)] ? str(x.rhythm) : '', hr: Math.round(num(x.hr)) || 0, by: cut(str(x.by), 60), visit: str(x.visit), src: str(x.src) || 'hand', seed: uid(),
+        ...(Number.isFinite(Number(x.mes)) && x.mes != null && x.mes !== '' ? { mes: Number(x.mes) } : {}), ...(str(x.batch) ? { batch: str(x.batch) } : {}),
     };
     // снимок помнит, каким было тело в тот день: протезы, трещины, Камни, срок — и где снимали
     const st = stones(s.who);
@@ -1071,6 +1336,10 @@ function personNote(who) {
         bits.push(`беременность ${pg.text}${zd?.name ? ` (ведёт ${zd.name})` : ''}`);
     }
     for (const l of limits(who).slice(0, 3)) bits.push(`${l.by ? `${short(l.by)}: ` : ''}${l.t}${l.until ? ` (до ${fmtDay(l.until)})` : ''}`);
+    const cs = conds(who).filter(x => x.st === 'active' || x.st === 'chronic').slice(0, 3);
+    if (cs.length) bits.push(`диагнозы: ${cs.map(x => x.t).join(', ')}`);
+    const al = allergyText(who);
+    if (al) bits.push(`аллергия: ${cut(al, 90)}`);
     const ms = activeMeds(who).slice(0, 4);
     if (ms.length) bits.push(`принимает: ${ms.map(x => `${x.name}${x.dose ? ` ${x.dose}` : ''}`).join(', ')}`);
     const v = lastVitals(who);
@@ -1110,9 +1379,25 @@ export function promptNote(type) {
 
 const CHRON_RULE = `
 
-kl — медицина в ЭТОМ посте (строка «КЛИНИКА» во входе). Только то, что прямо написано; ничего — {}. Пустые поля не пиши.
-{"w":[{"who":"","kg":0}],"h":[{"who":"","cm":0}],"v":[{"who":"","bp":"","hr":0,"t":0,"spo2":0}],"med":[{"who":"","name":"","dose":"","act":"start|stop"}],"visit":[{"who":"","doc":"","found":"","said":"","next":""}],"scan":[{"who":"","kind":"xray|ct|mri|ecg|us","area":"","found":""}]}
-w — взвесили или назвали вес (кг). h — назвали рост (см). v — измерили: bp «120/80», hr пульс, t температура, spo2 сатурация — только числа из текста. med — назначили или начали лекарство (start), отменили (stop); dose как в тексте. visit — был приём или осмотр у врача: doc — кто, found — что нашли (до 20 слов), said — что сказал врач (5–25 слов), next — когда снова. scan — сделали снимок: kind, area — что снимали, found — что увидели (до 20 слов). who — как в списке пациентов.`;
+kl — медицина в ЭТОМ посте (строка «КЛИНИКА» во входе). Только то, что прямо написано; ничего — {}. Пустые поля и пустые списки не пиши.
+{"w":[{"who":"","kg":0}],"h":[{"who":"","cm":0}],"v":[{"who":"","bp":"","hr":0,"t":0,"spo2":0}],"med":[{"who":"","name":"","dose":"","act":"start|stop"}],"visit":[{"who":"","doc":"","found":"","said":"","next":""}],"scan":[{"who":"","kind":"xray|ct|mri|ecg|us","area":"","found":""}],"ill":[{"who":"","t":"","st":"new|chronic|gone"}],"proc":[{"who":"","t":"","by":""}],"lab":[{"who":"","t":""}],"allergy":[{"who":"","t":""}],"doc":[{"name":"","role":"","title":"","place":""}],"plan":[{"who":"","doc":"","in_days":0,"date":"","note":""}]}
+w — взвесили или назвали вес (кг). h — назвали рост (см). v — измерили: bp «120/80», hr пульс, t температура, spo2 сатурация — только числа из текста. med — назначили или начали лекарство (start), отменили (stop); dose как в тексте. visit — был приём или осмотр у врача: doc — кто, found — что нашли (до 20 слов), said — что сказал врач (5–25 слов), next — когда снова. scan — сделали снимок: kind, area — что снимали, found — что увидели (до 20 слов).
+ill — врач поставил диагноз, заболел, обострилось или выяснилось хроническое (new | chronic), или прошло (gone): t — 2–8 слов, по-врачебному. Раны, ушибы, ожоги сюда не пиши — их ведёт Life. Романтика не медицина: «сердце сжалось», «кровь прилила» — не диагнозы.
+proc — процедура или операция: наложили швы, вправили, перевязали, поставили капельницу, перелили кровь, прооперировали; by — кто делал.
+lab — сдали анализы и есть результат: t — что сдали и что показали, коротко, с числами из текста.
+allergy — выяснилась аллергия или непереносимость: t — на что и как проявилась.
+doc — в посте появился врач или медик, которого НЕТ в списке врачей: name — как назвали, role — chief|er|therapist|cardio|trauma|neuro|psych|radio|dent|ob|peds|tech|research|medic|other, title — кто он, place — где принимает.
+plan — договорились о приёме, анализах или процедуре в будущем: in_days — через сколько дней от даты поста («через неделю» — 7), date — если названа дата (ГГГГ-ММ-ДД по дате истории), note — что и к кому, коротко.
+who — как в списке пациентов.`;
+
+/** Строка «КЛИНИКА» для Летописца: кто пациенты, кто врачи, что сейчас принимают. */
+function chronInputLine() {
+    const pats = patients().slice(0, 10).map(n => (short(n) !== canon(n) ? `${canon(n)} («${short(n)}»)` : canon(n)));
+    const dl = allDocs().filter(d => !d.z).slice(0, 10).map(d => d.name);
+    const zl = hasZD() ? zDocs().map(d => d.name).filter(Boolean) : [];
+    const ms = patients().slice(0, 6).map(n => { const x = activeMeds(n); return x.length ? `${short(n)}: ${x.slice(0, 4).map(y => y.name).join(', ')}` : ''; }).filter(Boolean);
+    return `КЛИНИКА: пациенты — ${pats.join(', ') || '—'}; врачи — ${[...dl, ...zl].join(', ') || '—'}${zl.length ? ` (приёмы у ${zl.join(', ')} в visit не пиши — их ведёт Зёрнышко)` : ''}${ms.length ? `; лекарства сейчас — ${ms.join('; ')}` : ''}.`;
+}
 
 export function chronHook(i = lastIndex()) {
     const c = cfg();
@@ -1120,12 +1405,31 @@ export function chronHook(i = lastIndex()) {
     const text = plain(chat()[i]?.mes || '');
     const today = storyDay();
     const visit = !!M().shots.length || (today && planToday().length);
-    if (!D.MED_RE.test(text) && !visit) return null;
-    const pats = patients().slice(0, 10).map(short);
-    const dl = allDocs().slice(0, 8).map(d => d.name);
-    const ms = patients().slice(0, 6).map(n => { const x = activeMeds(n); return x.length ? `${short(n)}: ${x.slice(0, 4).map(y => y.name).join(', ')}` : ''; }).filter(Boolean);
-    const input = `КЛИНИКА: пациенты — ${pats.join(', ') || '—'}; врачи — ${dl.join(', ') || '—'}${ms.length ? `; лекарства сейчас — ${ms.join('; ')}` : ''}.`;
-    return { key: '"kl": {}', rule: CHRON_RULE, input, tokens: 220 };
+    if (!medText(text) && !visit) return null;
+    return { key: '"kl": {}', rule: CHRON_RULE, input: chronInputLine(), tokens: 380 };
+}
+
+// ── её посты: Летописец Life их не читает — Клиника читает сама (только явная медицина, модель Летописца)
+const USER_SYS = `Ты — Летописец Клиники в ролевой истории (MCU AU, по-русски). Пост написал ИГРОК (своего персонажа); он может пересказывать слова врача от себя. Выпиши медицину этого поста по правилу ниже. Только JSON: {"kl":{…}}; ничего медицинского — {"kl":{}}.`;
+const userBusy = new Set();
+/** Её пост → записи поста (как у Летописца). Возвращает строки для тоста. */
+export async function readUserPost(i) {
+    const c = cfg();
+    if (!c.on || !c.chron || c.userPosts === false || !hasChat()) return [];
+    const m = chat()[i];
+    if (!m || !m.is_user || m.is_system || m.extra?.type === 'comment') return [];
+    const text = plain(m.mes || '');
+    const key = keyOf(m);
+    if (text.length < 20 || !medStrong(text)) { if (M().posts[key]) { delete M().posts[key]; touch(); } return []; }
+    if (userBusy.has(key) || !A?.askJson) return [];
+    userBusy.add(key);
+    try {
+        const k = clock();
+        const usr = `${chronInputLine()}\nДата истории: ${[dayOfMes(i), k.time].filter(Boolean).join(', ') || 'неизвестна'}.\nПОСТ (пишет ${canon(m.name) || userName()}):\n${cut(text, 7000)}`;
+        const j = await A.askJson([{ role: 'system', content: `${USER_SYS}\n${CHRON_RULE}` }, { role: 'user', content: usr }], 900, { what: 'Клиника: твой пост', check: (x) => x && typeof x === 'object' });
+        if (chat()[i] !== m || keyOf(m) !== key) return [];
+        return afterPost(i, { kl: j?.kl && typeof j.kl === 'object' ? j.kl : j }, m);
+    } catch (e) { console.warn('[Клиника] твой пост', e); return []; } finally { userBusy.delete(key); }
 }
 
 /** Ответ Летописца → записи поста. */
@@ -1148,7 +1452,49 @@ export function normEvents(a) {
     for (const x of arr(a.med)) { const name = cut(str(x?.name), 60); const act = ['start', 'stop'].includes(str(x?.act)) ? str(x.act) : 'start'; if (who(x) && name) out.push({ t: 'med', who: who(x), name, dose: cut(str(x?.dose), 50), act }); }
     for (const x of arr(a.visit)) { if (who(x) && (str(x?.found) || str(x?.said) || str(x?.doc))) out.push({ t: 'visit', who: who(x), doc: cut(str(x?.doc), 60), found: cut(str(x?.found), 220), said: cut(str(x?.said), 240), next: cut(str(x?.next), 80) }); }
     for (const x of arr(a.scan)) { const kind = D.SCANS[str(x?.kind)] ? str(x.kind) : ''; if (who(x) && kind) out.push({ t: 'scan', who: who(x), kind, area: cut(str(x?.area), 50), found: cut(str(x?.found), 200) }); }
-    return out.slice(0, 30);
+    for (const x of arr(a.ill)) { const text = cut(str(x?.t), 90); const st = ['new', 'chronic', 'gone'].includes(str(x?.st)) ? str(x.st) : 'new'; if (who(x) && text) out.push({ t: 'ill', who: who(x), text, st }); }
+    for (const x of arr(a.proc)) { const text = cut(str(x?.t), 160); if (who(x) && text) out.push({ t: 'proc', who: who(x), text, by: cut(str(x?.by), 60) }); }
+    for (const x of arr(a.lab)) { const text = cut(str(x?.t), 220); if (who(x) && text) out.push({ t: 'lab', who: who(x), text }); }
+    for (const x of arr(a.allergy)) { const text = cut(str(x?.t), 100); if (who(x) && text) out.push({ t: 'allergy', who: who(x), text }); }
+    for (const x of arr(a.doc)) {
+        const name = cut(str(x?.name), 70);
+        if (name.length < 3 || /^(врач|доктор|медсестра|медик|хирург|фельдшер|санитар)$/i.test(name)) continue;
+        out.push({ t: 'doc', name, role: D.ROLES[str(x?.role)] ? str(x.role) : 'other', title: cut(str(x?.title), 90), place: cut(str(x?.place), 90) });
+    }
+    for (const x of arr(a.plan)) {
+        const days = Math.round(num(x?.in_days));
+        const date = isDay(str(x?.date)) ? str(x.date) : '';
+        const note = cut(str(x?.note), 160);
+        if (who(x) && ((days > 0 && days <= 400) || date || relDays(note) != null)) out.push({ t: 'plan', who: who(x), doc: cut(str(x?.doc), 60), days: days > 0 && days <= 400 ? days : 0, date, note });
+    }
+    return out.slice(0, 40);
+}
+const EV_LINE = {
+    w: (e) => `${short(e.who)}: ${e.kg} кг`,
+    h: (e) => `${short(e.who)}: рост ${e.cm} см`,
+    v: (e) => `${short(e.who)}: ${[e.sys ? `${e.sys}/${e.dia}${(vitalFlag('sys', e.sys, e.who) || vitalFlag('dia', e.dia, e.who)) ? ` ${FLAG_WORD[vitalFlag('sys', e.sys, e.who) || vitalFlag('dia', e.dia, e.who)]}` : ''}` : '', e.hr ? `пульс ${e.hr}` : '', e.t ? `${e.t}°` : '', e.spo2 ? `SpO₂ ${e.spo2}%` : ''].filter(Boolean).join(', ')}`,
+    med: (e) => `${short(e.who)}: ${e.act === 'stop' ? 'отменили' : 'назначили'} ${e.name}${e.dose ? ` ${e.dose}` : ''}`,
+    visit: (e) => `Приём: ${short(e.who)}${e.doc ? ` у ${short(e.doc)}` : ''}${e.found ? ` — ${cut(e.found, 60)}` : ''}`,
+    scan: (e) => `${D.SCANS[e.kind]?.name || 'Снимок'}: ${short(e.who)}${e.found ? ` — ${cut(e.found, 50)}` : ''}`,
+    ill: (e) => `${short(e.who)}: ${e.st === 'gone' ? 'прошло' : e.st === 'chronic' ? 'хроническое' : 'диагноз'} — ${e.text}`,
+    proc: (e) => `${short(e.who)}: ${e.text}${e.by ? ` (${short(e.by)})` : ''}`,
+    lab: (e) => `Анализы ${short(e.who)}: ${cut(e.text, 70)}`,
+    allergy: (e) => `${short(e.who)}: аллергия — ${e.text}`,
+    doc: (e) => `Новый врач: ${e.name}${e.title ? ` — ${e.title}` : ''}`,
+    plan: (e) => `Запись: ${short(e.who)}${e.doc ? ` к ${short(e.doc)}` : ''}${e.date ? ` ${fmtDay(e.date)}` : e.days ? ` через ${e.days} дн` : ''}${e.note ? ` — ${cut(e.note, 50)}` : ''}`,
+};
+export const evLine = (e) => { try { return EV_LINE[e.t]?.(e) || ''; } catch { return ''; } };
+/** Для Life → «Что записал пост»: записи Клиники в посте i (удалить — тап). */
+export function postRecs(i) {
+    if (!cfg().on) return [];
+    const m = chat()[i];
+    const key = keyOf(m);
+    const rec = key && M().posts[key];
+    if (!rec || !Array.isArray(rec.ev)) return [];
+    return rec.ev.map((e, n) => ({
+        id: `kl:${key}:${n}`, g: 'Клиника', icon: 'hospital', t: evLine(e),
+        del: () => { const r = M().posts[key]; if (!r) return; r.ev = r.ev.filter((_, k) => k !== n); if (!r.ev.length) delete M().posts[key]; touch(); try { A?.updatePrompt?.(); } catch { /* */ } },
+    })).filter(r => r.t);
 }
 
 /** После Летописца: запись поста. Возвращает строки для тоста. */
@@ -1156,22 +1502,16 @@ export function afterPost(i, j, msg) {
     if (!cfg().on) return [];
     const m = msg || chat()[i];
     if (!m) return [];
-    const ev = normEvents(j?.kl);
+    const ev = normEvents(j?.kl).map(e => ({ ...e, k: uid().slice(0, 5) }));
     const key = keyOf(m);
     const store = M().posts;
     if (ev.length) store[key] = { i, ev, at: Date.now() };
     else if (store[key]) delete store[key];
     trimPosts();
     touch();
-    const out = [];
-    for (const e of ev) {
-        if (e.t === 'w') out.push(`${short(e.who)}: ${e.kg} кг`);
-        if (e.t === 'v') { const f = e.sys ? (vitalFlag('sys', e.sys, e.who) || vitalFlag('dia', e.dia, e.who)) : ''; out.push(`${short(e.who)}: ${[e.sys ? `${e.sys}/${e.dia}${f ? ` ${FLAG_WORD[f]}` : ''}` : '', e.hr ? `пульс ${e.hr}` : '', e.t ? `${e.t}°` : ''].filter(Boolean).join(', ')}`); }
-        if (e.t === 'med') out.push(`${short(e.who)}: ${e.act === 'stop' ? 'отменили' : 'назначили'} ${e.name}`);
-        if (e.t === 'visit') out.push(`Приём: ${short(e.who)}${e.doc ? ` у ${short(e.doc)}` : ''} — в медкарте`);
-        if (e.t === 'scan') out.push(`${D.SCANS[e.kind].name}: ${short(e.who)} — в снимках`);
-    }
-    return out;
+    const zn = hasZD() ? zDocs().map(d => d.name).filter(Boolean) : [];
+    // врача, который уже есть в Клинике, «новым» не называю; приём у врача Зёрнышка пишет Зёрнышко
+    return ev.filter(e => !(e.t === 'doc' && (M().docs.some(d => nameIs(d.name, e.name)) || zn.some(n => nameIs(n, e.name)))) && !(e.t === 'visit' && zn.some(n => nameIs(n, e.doc)))).map(evLine).filter(Boolean);
 }
 function trimPosts() {
     const store = M().posts;
@@ -1192,6 +1532,9 @@ async function askJson(system, user, tokens, what, check, story = null) {
     if (A?.askJson) return A.askJson(msgs, tokens, o);
     throw new Error('Нужен Life: Клиника говорит через его модели (Мир → ⚙)');
 }
+/** Для «По истории и логике»: тот же разговор с моделями Life. */
+export const ask = (system, user, tokens, what, check, story = null) => askJson(system, user, tokens, what, check, story);
+export const eraNote = () => eraLine();
 const MED_LORE_RE = /здоров|болезн|травм|ран[аыу]|шрам|перелом|операц|лекарств|таблет|обезбол|аллерг|сердц|кров|беремен|сыворот|мутац|камн|протез|рук[аи]|тело|сон|кошмар|ПТСР|паник|диагноз|врач|медиц|health|injur|scar|serum|arm/i;
 function eraLine() {
     const e = era();
@@ -1208,7 +1551,12 @@ export async function patientText(who) {
     out.push(`Пациент: ${canon(who)}${p.sex ? ` (${p.sex === 'F' ? 'жен.' : 'муж.'})` : ''}${p.age ? `, возраст ${p.age}` : ''}${heightOf(who) ? `, рост ${heightOf(who)} см` : ''}${lw ? `, вес ${lw.kg} кг (${fmtDay(lw.day)})` : ''}${b ? `, ИМТ ${b}` : ''}${p.blood ? `, группа крови ${p.blood}` : ''}.`);
     if (p.special) out.push(`Особенности: ${p.special}`);
     if (p.norms) out.push(`Свои нормы: ${p.norms}`);
-    if (p.allergy) out.push(`Аллергия: ${p.allergy}`);
+    const al = allergyText(who);
+    if (al) out.push(`Аллергия: ${al}`);
+    const cs = conds(who);
+    if (cs.length) out.push(`Диагнозы и состояния: ${cs.slice(0, 12).map(x => `${x.t}${x.st !== 'active' ? ` (${COND_ST[x.st] || x.st})` : ''}`).join('; ')}.`);
+    const hs = history(who).slice(0, 12);
+    if (hs.length) out.push(`Анамнез: ${hs.map(x => `${x.day ? `${fmtDay(x.day, true)} ` : ''}${x.t}${x.part && !norm(x.t).includes(norm(x.part)) ? ` (${x.part})` : ''}${x.healed ? ' — зажило' : ''}${x.by ? ` — ${x.by}` : ''}`).join('; ')}.`);
     if (p.implants.length) out.push(`Импланты: ${p.implants.map(x => `${x.note || x.kind}${x.mat ? ` (${x.mat})` : ''}`).join('; ')}`);
     const v = lastVitals(who);
     const vl = ['sys', 'hr', 'spo2', 't', 'rr'].filter(k => v[k]).map(k => (k === 'sys' ? `давление ${v.sys}/${v.dia}` : `${D.VITALS[k][3].toLowerCase()} ${v[k]}`));
@@ -1291,7 +1639,7 @@ export function normOption(o) {
 /** Применить выбранный исход: приём в медкарту, показатели, анализы, снимки, лекарства, следующий приём, заметка модели. */
 export function applyVisit({ who, doc, kind, reason = '', opt, scene = cfg().scene, plan = '' }) {
     const m = M();
-    const d = docById(doc);
+    const d = realDoc(doc);
     const day = storyDay();
     const vid = uid();
     const rec = {
@@ -1315,8 +1663,8 @@ export function applyVisit({ who, doc, kind, reason = '', opt, scene = cfg().sce
         const p = addPlan({ who, doc: d?.id || '', kind: opt.next.kind || kind, d: dayAdd(day, opt.next.days), note: opt.next.note, src: 'visit' });
         rec.next = { d: p.d, kind: p.kind, note: p.note, plan: p.id };
     }
-    if (plan) { const p = planById(plan); if (p) { p.st = 'done'; p.visit = vid; } }
-    else { const p = planToday().find(x => same(x.who, who) && (!x.doc || x.doc === rec.doc)); if (p) { p.st = 'done'; p.visit = vid; } }
+    if (plan) { const p = realPlan(plan); if (p) { p.st = 'done'; p.visit = vid; } }
+    else { const t = planToday().find(x => same(x.who, who) && (!x.doc || x.doc === rec.doc || x.doc === doc)); const p = t ? realPlan(t.id) : null; if (p) { p.st = 'done'; p.visit = vid; } }
     m.visits.push(rec);
     if (scene) arm('visit', sceneShot(rec, opt), { key: vid });
     logFeed(`Приём: ${short(who)}${d ? ` у ${d.name}` : ''} — ${opt.label}`, 'visit');

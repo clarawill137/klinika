@@ -22,6 +22,7 @@ const OPTS = { options: [
 const D = await import('../data.js');
 const C = await import('../core.js');
 const S = await import('../scans.js');
+const H = await import('../story.js');
 C.setApi(api);
 let n = 0;
 const ok = (name, fn) => { fn(); n++; console.log('✓', name); };
@@ -275,6 +276,194 @@ await okA('13 Васкез — врач Клиники: досье, приём �
     C.cfg().zdocs = false;
     assert.equal(C.visits('Хеди').filter(x => x.z).length, 0);
     C.cfg().zdocs = true;
+});
+
+ok('14 история пишет сама: диагнозы, процедуры, анализы, аллергия, новый врач, запись', () => {
+    ctx.chat.push({ mes: 'В медблоке доктор Стрэндж осмотрел Баки: сотрясение. Наложил три шва над бровью. Анализ крови — гемоглобин 150. Аллергия на пенициллин. Велел прийти через неделю.', is_user: false, swipe_id: 0, horae_meta: { timestamp: { story_date: '2024-12-27' } } });
+    const i = ctx.chat.length - 1;
+    assert.ok(C.chronHook(i)?.rule.includes('allergy'), 'медицинский пост — Летописец получает правило');
+    const t = C.afterPost(i, { kl: {
+        ill: [{ who: 'Bucky Barnes', t: 'Сотрясение мозга', st: 'new' }],
+        proc: [{ who: 'Bucky Barnes', t: 'Три шва над бровью', by: 'Стрэндж' }],
+        lab: [{ who: 'Bucky Barnes', t: 'Общий анализ крови: Hb 150' }],
+        allergy: [{ who: 'Bucky Barnes', t: 'пенициллин' }],
+        doc: [{ name: 'Стивен Стрэндж', role: 'neuro', title: 'нейрохирург', place: 'Нью-Йорк' }, { name: 'врач' }],
+        visit: [{ who: 'Bucky Barnes', doc: 'Стрэндж', found: 'сотрясение', said: 'Неделю без спаррингов', next: 'через неделю' }],
+        plan: [{ who: 'Хеди', doc: 'Амара Баретт', in_days: 3, note: 'ЭКГ' }],
+    } }, ctx.chat[i]);
+    assert.ok(t.some(x => x.includes('Новый врач: Стивен Стрэндж')) && t.some(x => x.includes('диагноз — Сотрясение')) && !t.some(x => /Новый врач: врач/.test(x)), t.join(' | '));
+    assert.equal(C.conds('Bucky Barnes')[0].t, 'Сотрясение мозга');
+    assert.ok(C.history('Bucky Barnes').some(h => h.kind === 'proc' && h.t.includes('шва')));
+    assert.ok(C.history('Bucky Barnes').some(h => h.kind === 'inj' && h.src === 'life'), 'травмы Life — в анамнезе');
+    assert.ok(C.allergyText('Bucky Barnes').includes('пенициллин'));
+    const note = C.promptNote('normal');
+    assert.ok(note.includes('диагнозы: Сотрясение мозга') && note.includes('аллергия: пенициллин'), note);
+    const pd = C.postDocs()[0];
+    assert.ok(pd && pd.name === 'Стивен Стрэндж' && /^pd:/.test(pd.id), JSON.stringify(C.postDocs()));
+    assert.ok(C.allDocs().some(d => d.id === pd.id));
+    const v = C.visits('Bucky Barnes').find(x => x.src === 'post' && x.mes === i);
+    assert.equal(v.doc, pd.id, 'приём из поста знает врача из поста');
+    const pp = C.postPlans();
+    assert.ok(pp.some(p => p.who === 'Bucky Barnes' && p.d === '2025-01-03'), JSON.stringify(pp));
+    assert.ok(pp.some(p => p.who === 'Хеди' && p.d === '2024-12-30' && p.kind === 'cardio'), 'запись к Амаре через 3 дня на ЭКГ → «Сердце и Камни»');
+    assert.ok(C.calEvents('2024-12-28', '2025-01-05').some(e => e.key.startsWith('kl:pp:')));
+    // «Что записал пост» в Life и удаление записи
+    const recs = C.postRecs(i);
+    assert.ok(recs.length >= 6 && recs.every(r => r.g === 'Клиника' && r.t), JSON.stringify(recs.map(r => r.t)));
+    recs.find(r => r.t.includes('аллергия')).del();
+    assert.equal(C.allergyText('Bucky Barnes'), '');
+    // тронула врача — он свой насовсем, свайп его не уносит
+    const real = C.realDoc(pd.id);
+    assert.ok(real && !/^pd:/.test(real.id) && real.from === pd.id);
+    assert.equal(C.postDocs().length, 0);
+    const hp = pp.find(p => p.who === 'Хеди');
+    const rp = C.realPlan(hp.id);
+    assert.ok(rp && C.M().plan.includes(rp), JSON.stringify({ hp, now: C.postPlans().map(p => p.id) }));
+    ctx.chat[i] = { ...ctx.chat[i], mes: 'другой ответ', swipe_id: 1 };
+    C.bump();
+    assert.equal(C.conds('Bucky Barnes').length, 0, 'свайп — диагноз поста ушёл');
+    assert.ok(C.docs().some(d => d.id === real.id), 'тронутый врач остался');
+    assert.equal(C.postPlans().filter(p => p.who === 'Bucky Barnes').length, 0);
+    // «прошло» закрывает свой диагноз
+    C.addCond('Хеди', { t: 'Анемия беременных', st: 'active' });
+    ctx.chat.push({ mes: 'Амара: анемии больше нет.', is_user: false, swipe_id: 0 });
+    C.afterPost(ctx.chat.length - 1, { kl: { ill: [{ who: 'Хеди', t: 'анемия', st: 'gone' }] } }, ctx.chat.at(-1));
+    assert.equal(C.conds('Хеди').find(c => c.t === 'Анемия беременных').st, 'past');
+    // приём у Васкез из поста пишет Зёрнышко, не Клиника
+    ctx.chat.push({ mes: 'Васкез посмотрела УЗИ.', is_user: false, swipe_id: 0 });
+    const tv = C.afterPost(ctx.chat.length - 1, { kl: { visit: [{ who: 'Хеди', doc: 'Васкез', found: 'всё по сроку' }] } }, ctx.chat.at(-1));
+    assert.equal(tv.length, 0);
+    assert.ok(!C.visits('Хеди').some(x => x.src === 'post' && C.nameIs(x.docName, 'Васкез')));
+    // имена и относительные даты
+    assert.ok(C.nameIs('Амара Баретт', 'доктор Баретт') && C.nameIs('Елена Васкез', 'Васкез') && !C.nameIs('Амара Баретт', 'Амара Смит'));
+    assert.ok(C.sim('Огнестрельное ранение плеча', 'Огнестрел в плечо') && !C.sim('Сотрясение мозга', 'Перелом рёбер'));
+    assert.equal(C.relDays('через неделю'), 7); assert.equal(C.relDays('через 3 дня'), 3); assert.equal(C.relDays('через пару месяцев'), 60); assert.equal(C.relDays('завтра'), 1);
+    assert.equal(C.relDays('в пятницу', '2024-12-27'), 7, '27.12.2024 — пятница: следующая через неделю');
+    assert.equal(C.relDays('в понедельник', '2024-12-27'), 3);
+    assert.equal(C.relDays('когда-нибудь'), null);
+});
+
+await okA('15 её пост: Клиника читает сама, только явную медицину', async () => {
+    let calls = 0;
+    api.askJson = async (msgs) => { calls++; assert.ok(msgs[0].content.includes('ИГРОК') && msgs[1].content.includes('ПОСТ (пишет Хеди)')); return { kl: { w: [{ who: 'Хеди', kg: 61.5 }], med: [{ who: 'Хеди', name: 'Фолиевая кислота', dose: '400 мкг', act: 'start' }] } }; };
+    ctx.chat.push({ mes: 'Хеди посмотрела на него, и сердце пропустило удар. Кровь прилила к щекам.', is_user: true, name: 'Хеди' });
+    let t = await C.readUserPost(ctx.chat.length - 1);
+    assert.equal(calls, 0, 'романтика — без запроса'); assert.equal(t.length, 0);
+    ctx.chat.push({ mes: 'Утром Хеди встала на весы — 61,5 кг — и выпила фолиевую кислоту, как велела Амара.', is_user: true, name: 'Хеди' });
+    const i = ctx.chat.length - 1;
+    t = await C.readUserPost(i);
+    assert.equal(calls, 1);
+    assert.ok(t.some(x => x.includes('61.5 кг')), t.join(' | '));
+    assert.equal(C.lastWeight('Хеди').kg, 61.5);
+    assert.ok(C.activeMeds('Хеди').some(m => m.name === 'Фолиевая кислота'));
+    ctx.chat[i] = { ...ctx.chat[i], mes: 'Утром Хеди просто выпила кофе.' };
+    C.bump();
+    t = await C.readUserPost(i);
+    assert.equal(calls, 1, 'после правки медицины нет — без запроса');
+    assert.ok(!C.activeMeds('Хеди').some(m => m.name === 'Фолиевая кислота'), 'правка — записи старого текста ушли');
+    C.cfg().userPosts = false;
+    ctx.chat.push({ mes: 'Хеди сдала анализы крови у Амары.', is_user: true, name: 'Хеди' });
+    assert.equal((await C.readUserPost(ctx.chat.length - 1)).length, 0);
+    assert.equal(calls, 1);
+    C.cfg().userPosts = true;
+});
+
+await okA('16 по истории и логике: куски, лист, запись, дочитка, отмена', async () => {
+    const keep = ctx.chatMetadata, keepChat = ctx.chat, w0 = world;
+    const deep0 = api.askDeepJson;
+    ctx.chatMetadata = { hurt: { chars: { 'Bucky Barnes': { list: [{ id: 1, status: 'healed', t: 'Огнестрел в плечо', part: 'левое плечо', kind: 'gunshot', sev: 3, care: 2, mes: 1, healedMes: 3 }], scars: [] } } } };
+    world = { timestamp: { story_date: '2024-12-27', story_time: '10:40' }, scene: { location: 'Обсерватория', characters_present: ['Bucky Barnes'] } };
+    const h = (d) => ({ timestamp: { story_date: d } });
+    ctx.chat = [
+        { name: 'Хеди', is_user: true, mes: 'Хеди проснулась рядом с ним. Сердце пело.', horae_meta: h('2024-11-19') },
+        { name: 'Bucky Barnes', is_user: false, mes: 'Они вышли из бара. Пуля вошла в плечо. Амара Баретт достала её в медблоке и наложила швы. Давление 110/70. Потом он уснул.', horae_meta: h('2024-11-20') },
+        { name: 'Bucky Barnes', is_user: false, mes: 'Они гуляли по набережной. Баки держал её за руку.', horae_meta: h('2024-11-21') },
+        { name: 'Хеди', is_user: true, mes: 'Хеди сдала анализы: гемоглобин 104, Амара назначила железо.', horae_meta: h('2024-12-02') },
+    ];
+    C.bump();
+    C.seed();
+    const pl = H.plan({});
+    assert.equal(pl.posts, 4); assert.equal(pl.list.length, 2, 'медицина — только в двух постах');
+    assert.ok(pl.list[0].text.includes('Пуля вошла в плечо') && pl.list[0].text.includes('Потом он уснул') && !pl.list[0].text.includes('набережной'), 'медицинские фразы и соседние — да, прогулка — нет');
+    assert.equal(pl.list[0].day, '2024-11-20');
+    assert.equal(H.packs(pl.list).length, 1);
+    const seen = [];
+    api.askDeepJson = async (msgs, tokens, o) => {
+        seen.push(o.what);
+        assert.ok(msgs[1].content.includes('[#1 · 20.11.2024 · Bucky Barnes]'), msgs[1].content.slice(0, 400));
+        return {
+            p: [{ who: 'Bucky Barnes', inj: [{ t: 'Огнестрельное ранение плеча', part: 'левое плечо', care: 'surgery', day: '2024-11-20', mes: 1 }], proc: [{ t: 'Извлечение пули, швы', by: 'Амара Баретт', day: '2024-11-20', mes: 1 }], v: [{ bp: '110/70', day: '2024-11-20', mes: 1 }] },
+                { who: 'Хеди', lab: [{ t: 'Гемоглобин 104', day: '2024-12-02', mes: 3 }], ill: [{ t: 'Анемия', st: 'active', day: '2024-12-02', mes: 3 }], med: [{ name: 'Железо', act: 'start', why: 'анемия', day: '2024-12-02', mes: 3 }] },
+                { who: 'Тот, кого нет', ill: [{ t: 'Грипп' }] }],
+            docs: [{ name: 'Амара Баретт', role: 'chief', mes: 1 }, { name: 'Хелен Чо', role: 'research', title: 'генетик', who: ['Хеди'], mes: 3 }],
+        };
+    };
+    api.askFillJson = async (msgs, tokens, o, story) => {
+        seen.push(o.what);
+        assert.ok(story?.world && story.who && msgs[1].content.includes('Найдено в истории сейчас'));
+        return story.who === 'Bucky Barnes'
+            ? { card: { sex: 'M', blood: 'O(I) Rh+', special: 'Сыворотка суперсолдата' }, cond: [{ t: 'ПТСР', st: 'chronic', why: '70 лет у Гидры', src: 'logic' }, { t: 'Огнестрельное ранение плеча', st: 'past', src: 'story' }], med: [{ name: 'Обезболивающее', why: 'плечо', src: 'logic' }], plan: [{ kind: 'arm', days: 30, doc: 'Шури', note: 'профилактика протеза', why: 'вибраниум требует настройки' }], docs: [{ name: 'Шури', role: 'tech', title: 'вакандский инженер', why: 'делала руку', src: 'logic' }] }
+            : { card: { sex: 'F' }, cond: [{ t: 'Анемия беременных', st: 'active', why: 'Hb 104', src: 'story' }], med: [{ name: 'Железо', src: 'story' }], plan: [] };
+    };
+    const steps = [];
+    const d = await H.fill({ story: true, logic: true, people: ['Хеди', 'Bucky Barnes'], onStep: () => steps.push(H.run.what) });
+    assert.equal(seen.length, 3, 'одна пачка истории + логика на двоих');
+    assert.ok(steps.some(s => s.startsWith('История')) && steps.some(s => s.startsWith('Логика')));
+    const L = d.items.map(x => `${x.type}:${x.who}:${H.line(x)}:${x.src}`);
+    assert.ok(!L.some(s => s.includes('Тот, кого нет')), 'чужих пациентов нет');
+    assert.ok(!d.items.some(x => x.type === 'inj'), 'огнестрел уже в Life — не дублирую');
+    assert.ok(!d.items.some(x => x.type === 'cond' && x.t.includes('Огнестрел')), 'прошлое ранение — в анамнезе, не диагнозом');
+    assert.ok(d.items.some(x => x.type === 'proc' && x.who === 'Bucky Barnes' && x.mes === 1));
+    assert.ok(d.items.some(x => x.type === 'vit' && x.sys === 110 && x.day === '2024-11-20'));
+    const anem = d.items.filter(x => x.type === 'cond' && x.who === 'Хеди');
+    assert.equal(anem.length, 1, 'анемия из истории и из логики — одна'); assert.equal(anem[0].src, 'story');
+    assert.equal(d.items.filter(x => x.type === 'med' && x.who === 'Хеди').length, 1);
+    assert.ok(d.items.some(x => x.type === 'doc' && x.name === 'Хелен Чо'));
+    assert.ok(!d.items.some(x => x.type === 'doc' && x.name === 'Амара Баретт'), 'Амара уже в Клинике');
+    assert.ok(d.items.some(x => x.type === 'doc' && x.name === 'Шури' && x.src === 'logic' && x.why));
+    assert.ok(d.items.some(x => x.type === 'cond' && x.t === 'ПТСР' && x.src === 'logic'));
+    assert.ok(!d.items.some(x => x.type === 'card' && x.field === 'sex'), 'пол уже стоит');
+    const pln = d.items.find(x => x.type === 'plan');
+    assert.equal(pln.d, '2025-01-26'); assert.equal(pln.kind, 'arm');
+    assert.ok(C.M().fillDraft?.items.length === d.items.length, 'лист лежит в чате, пока не записан');
+    d.items.find(x => x.type === 'med' && x.who === 'Bucky Barnes').on = false;
+    const r = H.apply();
+    assert.ok(r.n >= 8, String(r.n));
+    assert.equal(C.M().fillDraft, null);
+    assert.equal(C.M().histScan.upTo, 3, 'история прочитана до конца');
+    assert.equal(C.P('Bucky Barnes').blood, 'O(I) Rh+');
+    assert.ok(C.conds('Bucky Barnes').some(c => c.t === 'ПТСР' && c.src === 'logic' && c.why));
+    assert.ok(C.history('Bucky Barnes').some(x => x.kind === 'proc' && x.src === 'story' && x.mes === 1));
+    assert.ok(C.vitals('Bucky Barnes').some(x => x.sys === 110 && x.day === '2024-11-20' && x.src === 'story'));
+    assert.ok(!C.activeMeds('Bucky Barnes').length, 'снятая галочка не записана');
+    assert.ok(C.activeMeds('Хеди').some(m => m.name === 'Железо' && m.src === 'story' && m.from === '2024-12-02'));
+    const shuri = C.docs().find(x => x.name === 'Шури');
+    assert.ok(shuri && shuri.src === 'logic' && shuri.why);
+    assert.ok(C.planList({ who: 'Bucky Barnes' }).some(p => p.doc === shuri.id && p.kind === 'arm'));
+    assert.ok(C.promptNote('normal').includes('диагнозы: ПТСР'));
+    // ещё раз — история дочитана, модель не зову
+    seen.length = 0;
+    const d2 = await H.fill({ story: true, logic: false });
+    assert.equal(seen.length, 0); assert.equal(d2.items.length, 0);
+    H.dropDraft();
+    // новые посты — дочитывается только новое
+    ctx.chat.push({ name: 'Bucky Barnes', is_user: false, mes: 'Амара сняла швы с плеча.', horae_meta: h('2024-12-20') });
+    assert.equal(H.plan({}).list.length, 1);
+    assert.equal(H.plan({ fresh: true }).list.length, 3);
+    ctx.chat.pop();
+    // отмена пачки
+    const n2 = H.undo(r.id);
+    assert.ok(n2 >= r.n, `${n2} / ${r.n}`);
+    assert.equal(C.P('Bucky Barnes').blood, '');
+    assert.equal(C.conds('Bucky Barnes').length, 0);
+    assert.ok(!C.docs().some(x => x.name === 'Шури'));
+    assert.ok(!C.activeMeds('Хеди').some(m => m.src === 'story'));
+    assert.equal(H.lastFill(), null);
+    // по одному: только его посты, с начала чата
+    const one = H.plan({ who: 'Хеди' });
+    assert.equal(one.from, 0); assert.equal(one.list.length, 1); assert.equal(one.list[0].i, 3);
+    api.askDeepJson = deep0;
+    ctx.chatMetadata = keep; ctx.chat = keepChat; world = w0; C.bump();
 });
 
 console.log(`\nВсе ${n} блоков зелёные.`);

@@ -1,6 +1,7 @@
 // ✦ Клиника — врачи, чекапы, медкарты и снимки. Живёт рядом с Life: через LifeBridge получает время Horae,
-// Летописца (вес, давление, лекарства, приёмы и снимки — по постам), скрытую заметку модели, строку в «Сцене»,
-// страницу человека, трекер и календарь. Плитка «Медблок» у Арта открывает её (globalThis.Klinika).
+// Летописца (вес, давление, лекарства, диагнозы, процедуры, приёмы, снимки, врачи и записи — по постам), скрытую
+// заметку модели, строку в «Сцене», страницу человека, трекер, календарь и «Что записал пост». Её собственные посты
+// читает сама. «По истории и логике» (story.js) заполняет Клинику по всему чату. Плитка «Медблок» у Арта открывает её.
 
 import * as C from './core.js';
 import * as D from './data.js';
@@ -27,6 +28,8 @@ function register() {
         personRow: (who) => U.personRow(who),
         calEvents: (from, to) => C.calEvents(from, to),
     });
+    // «Что записал пост» в Life: записи Клиники под постом (тап — убрать)
+    try { api?.shelf?.recs?.((i) => C.postRecs(i)); } catch (e) { console.warn('[Клиника] записи поста', e); }
     try {
         api?.shelf?.tracker?.({
             id: 'klinika', ico: '🩺', name: 'Медкарта',
@@ -63,7 +66,8 @@ function settingsDrawer() {
         <div class="inline-drawer-toggle inline-drawer-header"><b>✦ Клиника</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
         <div class="inline-drawer-content">
             <label class="checkbox_label"><input type="checkbox" data-klc="on" ${s.on ? 'checked' : ''}> Включено</label>
-            <label class="checkbox_label"><input type="checkbox" data-klc="chron" ${s.chron ? 'checked' : ''}> Летописец пишет из постов вес, давление, лекарства, приёмы и снимки</label>
+            <label class="checkbox_label"><input type="checkbox" data-klc="chron" ${s.chron ? 'checked' : ''}> История пишет в Клинику сама: Летописец берёт из постов вес, давление, лекарства, диагнозы, процедуры, анализы, аллергии, приёмы, снимки, новых врачей и записи к врачу</label>
+            <label class="checkbox_label"><input type="checkbox" data-klc="userPosts" ${s.userPosts !== false ? 'checked' : ''}> И твои посты — только где есть явная медицина (свой короткий запрос модели Летописца)</label>
             <label class="checkbox_label"><input type="checkbox" data-klc="dice" ${s.dice ? 'checked' : ''}> Кубик подсказывает, какой исход приёма «выпал»</label>
             <label class="checkbox_label"><input type="checkbox" data-klc="scene" ${s.scene ? 'checked' : ''}> Приём по умолчанию «в сцену» — модель играет его в ответе</label>
             <label class="checkbox_label"><input type="checkbox" data-klc="artur" ${s.artur ? 'checked' : ''}> «Медблок» в Арте открывает Клинику</label>
@@ -163,6 +167,21 @@ jQuery(async () => {
         if (E.CHARACTER_MESSAGE_RENDERED) eventSource.on(E.CHARACTER_MESSAGE_RENDERED, onAi);
         else if (E.MESSAGE_RECEIVED) eventSource.on(E.MESSAGE_RECEIVED, onAi);
         for (const ev of [E.MESSAGE_SWIPED, E.MESSAGE_DELETED, E.MESSAGE_EDITED, E.MESSAGE_UPDATED]) if (ev) eventSource.on(ev, refresh);
+        // её посты Летописец Life не читает — читаю сама (только явная медицина); правка поста — перечитать
+        const mine = (id) => {
+            if (!api) return;
+            const i = Number(id);
+            if (!Number.isFinite(i)) return;
+            C.readUserPost(i).then((t) => { if (t.length) { C.toast('info', t.slice(0, 4).map(C.esc).join(' · ')); refresh(); } }).catch(e => console.warn('[Клиника] твой пост', e));
+        };
+        if (E.MESSAGE_SENT) eventSource.on(E.MESSAGE_SENT, mine);
+        const edits = new Map();
+        if (E.MESSAGE_EDITED) eventSource.on(E.MESSAGE_EDITED, (id) => {
+            const i = Number(id);
+            if (!SillyTavern.getContext().chat?.[i]?.is_user) return;
+            clearTimeout(edits.get(i));
+            edits.set(i, setTimeout(() => { edits.delete(i); mine(i); }, 1500));
+        });
         eventSource.on(E.CHAT_CHANGED, () => { C.bump(); C.clearLore(); if (U.isOpen()) U.close(); });
         if (E.APP_READY) eventSource.on(E.APP_READY, () => { addWand(); settingsDrawer(); });
     } catch (e) { console.warn('[Клиника] события', e); }
